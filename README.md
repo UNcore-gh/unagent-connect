@@ -1,4 +1,4 @@
-# UNagent Connect 0.1.0
+# UNagent Connect 0.1.1
 
 让 Codex、Claude 和其他支持 skill 的外部 AI，通过本机桥接与 Obsidian 中的 UNagent 配对、通讯和协作。
 
@@ -6,7 +6,7 @@
 
 ## 安装
 
-需要 Node.js 18 或更新版本。固定下载入口为 [0.1.0 Release](https://github.com/UNcore-gh/unagent-connect/releases/tag/0.1.0)。若该版本尚未发布，请停止并等待发布。
+需要 Node.js 18 或更新版本。固定下载入口为 [0.1.1 Release](https://github.com/UNcore-gh/unagent-connect/releases/tag/0.1.1)。若该版本尚未发布，请停止并等待发布。
 
 下载压缩包和 SHA256SUMS，先验证压缩包 SHA256，通过后再解压，并验证包内逐文件校验。完整步骤见 [INSTALL.md](INSTALL.md)。
 

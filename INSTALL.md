@@ -1,8 +1,8 @@
-# 安装 UNagent Connect 0.1.0
+# 安装 UNagent Connect 0.1.1
 
-唯一发布来源：https://github.com/UNcore-gh/unagent-connect/releases/tag/0.1.0 。未发布时停止，不改用源码仓或 latest。
+唯一发布来源：https://github.com/UNcore-gh/unagent-connect/releases/tag/0.1.1 。未发布时停止，不改用源码仓或 latest。
 
-需要 Node.js 18+。下载 `unagent-connect-0.1.0.tar.gz` 和同一 Release 的 `SHA256SUMS`，在空目录运行 `shasum -a 256 -c SHA256SUMS`，通过后才解压。进入解压目录，再运行 `shasum -a 256 -c SHA256SUMS`；校验失败停止。SHA256 用于检测损坏，可信来源仍是固定 GitHub Release。
+需要 Node.js 18+。下载 `unagent-connect-0.1.1.tar.gz` 和同一 Release 的 `SHA256SUMS`，在空目录运行 `shasum -a 256 -c SHA256SUMS`，通过后才解压。进入解压目录，再运行 `shasum -a 256 -c SHA256SUMS`；校验失败停止。SHA256 用于检测损坏，可信来源仍是固定 GitHub Release。
 
 先查看差异：
 

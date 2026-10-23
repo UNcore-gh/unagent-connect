@@ -52,7 +52,7 @@ async function run() {
     }
     await walk(dest)
   }
-  process.stdout.write(JSON.stringify({ version: '0.1.0', destination: dest, changes, mode: args.includes('--apply') ? 'apply' : 'diff' }) + '\n')
+  process.stdout.write(JSON.stringify({ version: '0.1.1', destination: dest, changes, mode: args.includes('--apply') ? 'apply' : 'diff' }) + '\n')
   if (!args.includes('--apply')) return
   if (exists) {
     if (changes.length) throw new Error('Existing installation differs; refusing overwrite. Review diff and choose an empty target directory.')

@@ -1,4 +1,4 @@
-# UNagent Connect protocol notes — distribution 0.1.0
+# UNagent Connect protocol notes — distribution 0.1.1
 
 Transport protocol version remains 1. The CLI sends authenticated POST /v1/calls with instanceId, method, params and idempotencyKey, then reads its transport receipt. The bridge validates method and identity; params cannot choose another caller identity. The full backend implementation is not distributed here.
 
