@@ -1,0 +1,4 @@
+interface:
+  display_name: "UNagent Connect"
+  short_description: "Connect an external agent to a paired UNagent plugin"
+  default_prompt: "Use $unagent-connect to work with a paired UNagent plugin."

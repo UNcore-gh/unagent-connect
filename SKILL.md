@@ -1,0 +1,83 @@
+---
+name: unagent-connect
+description: Use a paired UNagent Obsidian plugin through its local bridge to list models, agents, sessions, and create or manage business tasks.
+metadata:
+  short-description: Connect to a paired UNagent plugin
+---
+
+# UNagent Connect
+
+Use this skill when an external agent needs to call a user's explicitly paired UNagent plugin. This skill uses only the local bridge CLI and the selected instance; it does not read Obsidian settings, Vault notes, plugin `data.json`, or API keys.
+
+## First connection
+
+1. Check that Node.js 18 or newer is already available with `node --version`. If it is missing, tell the user to install or enable Node.js themselves. Do not install it automatically.
+2. Run `./scripts/unagent-connect start`, then check `status`. If the plugin has not been paired yet, run `./scripts/unagent-connect pair-code`. Paste the returned short-lived code into Obsidian 设置 → 通用 → 外部 AI 通讯 → Pair. The default bridge address is `http://127.0.0.1:27123`; the user may have explicitly configured another loopback port.
+3. In that plugin's Bridge settings, create a client pairing code. Run `./scripts/unagent-connect client-register --name <stable-client-name> --purpose <short-purpose>` and paste the prompted code. Ask the user for a recognizable name and short purpose (for example, name Codex-work, purpose code review). --purpose is optional; never invent one. Use the same stable name on later runs; CLI credentials are stored with restrictive file permissions under `~/.unagent/bridge/clients/`.
+4. Run `./scripts/unagent-connect list-instances`. Select the exact `instanceId` the user wants. Every business call must pass it explicitly.
+
+`pair-code` registers a plugin host. The settings page creates a separate one-use client code. A client token cannot create pairing codes, list other instances, or revoke identities.
+
+## Calling UNagent
+
+Methods require matching backend support; METHOD_NOT_FOUND means unavailable, never success. Supported baseline methods are `models.list`, `agents.list`, `sessions.list`, `sessions.create`, `sessions.update`, `sessions.send`, `tasks.get`, `tasks.wait`, `tasks.answer`, and `tasks.cancel`.
+
+Pass JSON through a file or standard input so message text does not need shell escaping:
+
+```sh
+./scripts/unagent-connect call sessions.list \
+  --instance INSTANCE_ID --client stable-client --idem list-20261021-01
+
+./scripts/unagent-connect call sessions.send \
+  --instance INSTANCE_ID --client stable-client \
+  --idem send-20261021-01 --params-file ./send-params.json
+```
+
+`sessions.send` returns only after the plugin dispatch acknowledges the business operation. For a task, save `result.task.id` as the business task ID; the bridge's `callId` is only a short-lived transport ID. Receipt means accepted, not completed. The CLI requires a stable `--idem` for every call. Delivery via `sessions.send` and `participants.send` has durable plugin-side deduplication. Both inject --idem as params.idempotencyKey and reject a conflicting inner key; reuse the same key after bridge restart. Other mutations use the bridge's temporary transport cache; after a bridge restart, inspect the current session/task state before repeating them, especially `sessions.create`, which could create another chat.
+
+Use `wait TASK_ID`, `answer TASK_ID`, or `cancel TASK_ID` to work with the business task. `answer` reads parameters from `--params-file` or stdin. For `tasks.get`, pass a JSON file such as `{"taskId":"..."}` to `call tasks.get`.
+
+If a call times out, the CLI returns its temporary transport `callId`. While the bridge process remains up, resume with `call --request-id CALL_ID --instance INSTANCE_ID --client stable-client`. If the bridge restarted, retry a delivery with the same `--idem`; if the business task ID is already known, query using `tasks.get` or `wait`. If a delivered call was disconnected before acknowledgement, its business effect may already have happened. The CLI reports non-idempotent outcomes as unknown instead of replaying them. Inspect current state before issuing a new mutation. Do not treat an HTTP `202` or a queued transport entry as business success.
+
+When `wait` returns `waiting_origin`, answer its exact question ID using `answer`. When it returns `waiting_user` or `interrupted`, tell the user to handle confirmation or recovery in Obsidian; do not answer on their behalf or treat a clarification as permission. Bounded waits can time out while the task continues: keep its original task ID and wait/query again, never create a replacement task to poll for progress.
+
+## Safe operating rules
+
+- Use the instance id selected by the user. Never probe other instance ids.
+- Reuse the same `--idem` when retrying the same mutation. Choose a new id for a genuinely new action.
+- Use the stable client profile name supplied at registration. Client identity is authenticated by the saved token, not by a name in request parameters.
+- Pair codes expire after five minutes. Do not put pairing codes or tokens in URLs, skill files, notes, logs, or shell scripts.
+- `stop` shuts down the user's local bridge. Run it only when the user explicitly asks to stop the service.
+- For command parameters, result shapes, and lifecycle details, read [reference/cli.md](reference/cli.md).
+
+## 外部参与者与收件箱
+
+后端提供后可用 call 调用 participants.list/send、inbox.list/claim/complete/fail/question/heartbeat、sessions.read。先 participants.list 发现入口；inbox.list 查看待办，领取成功后才工作，使用后端返回的任务及领取标识提交结果。question 是工作澄清，不是用户审批。领取返回 executionToken；执行中用 inbox.heartbeat 续租，完成、失败和提问都携带该凭证，旧凭证不可复用。参数见 reference/bridge-protocol.md，sessions.read 使用 sessionId、可选 cursor/limit/maxChars，只可读开放协作会话。外部客户端不能派给其他外部客户端。所有正文写 JSON 文件或标准输入（--params-file -），不要拼进 shell 命令。
+
+## 共同协作规则
+
+- 先发现真实参与者，再使用返回的精确 ID；不猜名称、在线状态或能力。
+- 把任务目标、输入、交付物和完成条件说清楚。回执只是接收，完成必须有结果。
+- 同一操作重试复用稳定幂等键；断线后先查询，不盲目重放领取、完成、失败等修改。
+- 澄清问题使用真实 questionId；用户审批只能由用户处理，不可代答或绕过。
+- 仅传任务必要内容，不传凭据、无关历史或无关笔记。没有数据就说明没有数据。
+
+## 引用对话与按需读取
+
+- @对话引用只提供目标 sessionId、标题等元信息，不包含消息正文，也不会启动目标 AI。引用本身不是派活指令。
+- 用户只要求了解、总结、比较或读取引用对话时，内置用 sessions_read，外部 CLI 用 call sessions.read；按需读取接口返回的可见 user/assistant 消息。需要更早消息且返回 nextCursor 时，把它原样作为下一次 cursor；已足够回答时停止，不猜游标、不批量转发整段历史。
+- 仅用户明确要求派活时，才用 sessions_send / participants_send（外部为 sessions.send / participants.send）派发任务；读取引用不发送消息、不创建任务、不唤醒目标。
+- 只消费 reader 返回的安全消息投影，不请求、重建或暴露私有字段，例如隐藏推理、系统提示、工具原始参数/结果、运行检查点、执行凭证或认证信息；读取仍服从当前调用者可见范围和权限。
+
+
+## 手动接活后的有限续租
+
+这不是常驻 worker。用户手动让外部 AI 接活、inbox.claim 成功后，如果工作可能超过默认 60 秒租约，立即在独立终端启动续租助手：
+
+```sh
+./scripts/unagent-connect heartbeat --instance INSTANCE_ID --client stable-client --params-file ./lease.json --duration-ms 900000
+```
+
+lease.json 只放当前领取返回的 taskId 和 executionToken，私有保存、不进聊天或版本库；也可用 --params-file - 经 stdin 传入。助手立即续租，之后每 20 秒一次；单次调用最多 10 秒，任一失败立即停止、不重试。默认 15 分钟，最长 1 小时；到期停止，不能建议无限循环自动重启。关注助手退出结果，失败后暂停工作并查看真实任务状态，不把本地产出当已提交。
+
+工作完成、失败或提问时先停止助手（终端 Ctrl+C，或向它输出的 PID 发送 SIGTERM），再提交对应 complete/fail/question。停止助手不会停止桥接，也不会自动完成任务。提问获答后需重新 claim，拿新 executionToken 再按需启动；租约超时会 interrupted，必须由用户在宿主界面重置，不自动抢回或新建替代任务。

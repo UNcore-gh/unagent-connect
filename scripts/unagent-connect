@@ -1,0 +1,9 @@
+#!/bin/sh
+
+if ! command -v node >/dev/null 2>&1; then
+  printf '%s\n' '{"error":{"code":"NODE_MISSING","message":"需要 Node.js 18 或更新版本；请自行安装或启用，本工具不会自动安装。"}}' >&2
+  exit 127
+fi
+
+SCRIPT_DIR="$(CDPATH= cd "$(dirname "$0")" && pwd)"
+exec node "$SCRIPT_DIR/unagent-connect.mjs" "$@"
