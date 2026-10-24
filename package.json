@@ -1,0 +1,25 @@
+{
+  "name": "@uncore/unagent-connect",
+  "version": "0.2.0",
+  "type": "module",
+  "private": true,
+  "description": "Local multi-agent messaging and task hub with opt-in execution",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "unagent-connect": "bin/connect.mjs"
+  },
+  "scripts": {
+    "start": "node bin/connect.mjs serve",
+    "test": "node --test test/*.test.mjs",
+    "check": "node scripts/check.mjs",
+    "package": "node scripts/package.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.21.0"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.0"
+  }
+}
