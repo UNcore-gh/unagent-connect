@@ -1,19 +1,20 @@
-# 安装 UNagent Connect 0.1.1
+# 本机安装与分发
 
-唯一发布来源：https://github.com/UNcore-gh/unagent-connect/releases/tag/0.1.1 。未发布时停止，不改用源码仓或 latest。
+独立服务需要 Node.js 22.13+；本工具不安装 Node.js，不写用户 MCP 配置，不安装或修改 LaunchAgent，不停止已有服务。保留原 LICENSE。
 
-需要 Node.js 18+。下载 `unagent-connect-0.1.1.tar.gz` 和同一 Release 的 `SHA256SUMS`，在空目录运行 `shasum -a 256 -c SHA256SUMS`，通过后才解压。进入解压目录，再运行 `shasum -a 256 -c SHA256SUMS`；校验失败停止。SHA256 用于检测损坏，可信来源仍是固定 GitHub Release。
+1. 源码由项目维护者安装 `package.json` 中的依赖后，运行 `node scripts/package.mjs --out /绝对路径/空输出目录`。产物位于其 `unagent-connect/` 子目录。构建只收集白名单源码与已安装的运行依赖，不启动任何原生执行入口，也不执行 npm 生命周期脚本。原生 SDK 在选中对应入口时才加载。内含的原生依赖随构建机器平台，跨系统构建应在目标平台重新打包。
+2. 在产物目录运行 `node scripts/install.mjs --target codex` 预览差异。Codex 默认目标 `~/.agents/skills`，Claude 默认 `~/.claude/skills`。其他宿主必须指定 `--target other --target-dir /绝对路径/skills`；也可覆盖前两种默认路径。最终安装目录是目标下的 `unagent-connect`。
+3. 确认目标和差异后，加 `--apply`。不带该参数时不会创建或修改目标目录。源码的 `node bin/connect.mjs install ...` 会先在系统临时目录构建独立包，结束后清理该临时包。
+4. 安装前校验每个文件的 SHA-256，拒绝符号链接、目录穿越、被改动的分发文件。已有目标只要与待装包不同，就拒绝覆盖，包括本地修改、额外文件和不同版本。为新版本选择新目标目录，保留旧安装，人工比较后再切换；不自动迁移凭据。
 
-先查看差异：
+旧版 0.1.1 技能及 `scripts/unagent-connect` 的配对继续可用。安装不会读取或改写旧 bridge 的用户配置。不要把 Hub 管理员令牌交给模型；新参与者凭据仅本次显示，私下保存到 600 权限文件，通过 MCP 环境或 `--token-file` 引用。
 
-```sh
-node scripts/install.mjs --target codex
-node scripts/install.mjs --target claude
-node scripts/install.mjs --target-dir /absolute/path/to/skills
-```
+可直接移动整个构建产物目录再运行 `node bin/connect.mjs serve`。无需 Obsidian 插件仓库或源码仓库，MCP 运行依赖包含在包中；各原生入口仍需用户已安装并授权对应原生应用或连接器。管理页的“检查入口状态”会报告缺少配置或不兼容，不代表任务已执行成功。
 
-选择一种目标，检查输出后给原命令加 `--apply`。默认分别为 `~/.agents/skills/unagent-connect` 与 `~/.claude/skills/unagent-connect`。自定义目录是技能父目录。已有内容不同或有本地新增文件，一律拒绝覆盖；先人工备份并移走旧目录，或另选空目录。不会修改其他配置，也不会自动更新 Node。
+分发白名单包括 `src/**/*.mjs`、入口脚本、必要文档、技能、agents 元数据、原 LICENSE 与已安装的依赖闭包。不包含测试、状态目录、日志、`.env`、`data.json`、私有插件源码、令牌或数据库。SHA256SUMS 检测损坏与本地变更，并非数字签名；只从信任的来源取得完整分发包。
 
-安装后阅读 SKILL.md：启动本机桥接、生成插件配对码，在 Obsidian「外部 AI 通讯」配对，再创建单独的客户端配对码。凭据不进入提示词或 GitHub。配对完成后用 CLI status 和实际只读调用分别确认桥接、插件和客户端联系。
+## 可选 Claude 运行依赖
 
-配对前为入口选择易识别的名称与用途，例如名称 Codex-work、用途“代码检查”。注册命令为 `./scripts/unagent-connect client-register --name Codex-work --purpose 代码检查`，用途可省略。配对码通过交互输入或 --code-file 提供，不写进提示词或 shell 历史。更改已配对用途不会自动覆盖旧身份，请通过宿主撤销、重新配对。此包沿用同目录 LICENSE，公开通讯包不代表源码获得开源授权。
+开发源码安装基础服务用 `npm ci --omit=optional --ignore-scripts`。默认分发包只包含 Hub/MCP 所需依赖，不包含 Claude SDK；Codex 使用本机已有命令，WorkBuddy/Harness 使用用户现有原生连接器。
+
+要制作含 Claude 自动执行能力的本机包，维护者先按锁文件安装可选依赖，再执行 `node scripts/package.mjs --out /新的空目录 --adapters claude`。也可在服务自己的安装目录显式安装 `@anthropic-ai/claude-agent-sdk@0.2.141`；这不会配置账号或更改其他 Agent 的设置。只有对应入口开启自动执行时才启动原生进程。

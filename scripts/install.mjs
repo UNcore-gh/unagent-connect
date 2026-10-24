@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Standalone Node.js tool; never bundled into the Obsidian plugin.
 import process from 'node:process'
-import { readFile, lstat, readdir, mkdir, copyFile, mkdtemp, rename, rm } from 'node:fs/promises'
+import { readFile, lstat, readdir, mkdir, copyFile, mkdtemp, rename, rm, realpath } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import os from 'node:os'
@@ -11,9 +11,17 @@ const args = process.argv.slice(2)
 const value = key => { const i = args.indexOf(key); return i < 0 ? undefined : args[i + 1] }
 async function run() {
   const target = value('--target')
+  if (target && !['codex', 'claude', 'other'].includes(target)) throw new Error('Invalid target')
   if (!['codex', 'claude'].includes(target) && !value('--target-dir')) throw new Error('Use --target codex|claude or --target-dir SKILLS_DIRECTORY')
   const parent = path.resolve(value('--target-dir') || path.join(os.homedir(), target === 'codex' ? '.agents/skills' : '.claude/skills'))
   const dest = path.join(parent, 'unagent-connect')
+  // Refuse traversing symlinked ancestors, including on first installation.
+  let ancestor = path.parse(parent).root
+  for (const segment of parent.slice(ancestor.length).split(path.sep).filter(Boolean)) {
+    ancestor = path.join(ancestor, segment)
+    try { if ((await lstat(ancestor)).isSymbolicLink() && !((ancestor === '/var' && await realpath(ancestor) === '/private/var') || (ancestor === '/tmp' && await realpath(ancestor) === '/private/tmp'))) throw new Error('Symlink refused') }
+    catch (e) { if (e.code !== 'ENOENT') throw e }
+  }
   const entries = (await readFile(path.join(source, 'SHA256SUMS'), 'utf8')).trim().split('\n').map(line => {
     const match = /^([a-f0-9]{64}) {2}(.+)$/.exec(line)
     if (!match || match[2].split('/').some(x => !x || x === '..' || x === '.') || path.isAbsolute(match[2]) || match[2].includes('\\')) throw new Error('Invalid checksum path')
@@ -52,7 +60,7 @@ async function run() {
     }
     await walk(dest)
   }
-  process.stdout.write(JSON.stringify({ version: '0.1.1', destination: dest, changes, mode: args.includes('--apply') ? 'apply' : 'diff' }) + '\n')
+  process.stdout.write(JSON.stringify({ version: await readFile(path.join(source, 'package.json'), 'utf8').then(t => JSON.parse(t).version, () => readFile(path.join(source, 'VERSION'), 'utf8').then(t => t.trim())), destination: dest, changes, mode: args.includes('--apply') ? 'apply' : 'diff' }) + '\n')
   if (!args.includes('--apply')) return
   if (exists) {
     if (changes.length) throw new Error('Existing installation differs; refusing overwrite. Review diff and choose an empty target directory.')

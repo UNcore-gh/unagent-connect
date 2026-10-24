@@ -1,0 +1,9 @@
+node_modules/
+state/
+data/
+dist/
+.env
+*.log
+.DS_Store
+
+.validation/

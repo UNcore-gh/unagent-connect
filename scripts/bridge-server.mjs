@@ -26,6 +26,7 @@ export const ALLOWED_METHODS = new Set([
   'sessions.create',
   'sessions.update',
   'sessions.send',
+  'connect.submit',
   'tasks.get',
   'tasks.wait',
   'tasks.answer',
@@ -36,6 +37,7 @@ const ALLOWED_ORIGINS = new Set(['app://obsidian.md'])
 const BUSINESS_IDEMPOTENCY_METHODS = new Set([
   'participants.send', 'inbox.claim', 'inbox.complete', 'inbox.fail',
   'sessions.send',
+  'connect.submit',
 ])
 const jsonHeaders = {
   'Content-Type': 'application/json; charset=utf-8',
@@ -206,7 +208,8 @@ export function createBridgeServer({
     return changed
   }
 
-  function persist() {
+  function persist(force = false) {
+    if (isClosed && !force) return persistTail
     const snapshot = JSON.stringify(state)
     persistTail = persistTail.then(async () => {
       const temp = path.join(stateDir, `.bridge-state-${process.pid}-${randomToken()}.tmp`)
@@ -1029,7 +1032,7 @@ export function createBridgeServer({
       server.closeAllConnections?.()
       await closed
     }
-    await persist()
+    await persist(true)
   }
 
   return {

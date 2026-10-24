@@ -1,11 +1,25 @@
 ---
 name: unagent-connect
-description: Use a paired UNagent Obsidian plugin through its local bridge to list models, agents, sessions, and create or manage business tasks.
+description: Use the local UNagent Connect hub for participant messages and tasks over CLI or MCP, or use an explicitly paired legacy UNagent Obsidian bridge. Does not install services or configure global MCP automatically.
 metadata:
   short-description: Connect to a paired UNagent plugin
 ---
 
 # UNagent Connect
+
+## 先确认使用哪一条连接
+
+独立 Hub 使用 `bin/connect.mjs`（Node.js 22.13+，默认端口 18492）；原 0.1.1 桥接使用 `scripts/unagent-connect`（Node.js 18+，默认端口 27123）。已配对的旧连接沿用，不自动迁移、重新配对或修改用户全局 MCP/后台服务。以下「First connection」及其旧命令只适用于原 bridge。
+
+### 独立 Hub
+
+- 已有服务时先 `node bin/connect.mjs status`，使用用户指定的参与者令牌及项目。管理页由本机用户创建参与者并设置可通信对象，自动执行默认关闭；不能索取、读取或转发管理员 connection.json/令牌来获得管理权限。
+- CLI 调用为 `node bin/connect.mjs rpc METHOD --params-file ./params.json --token-file /私有路径/participant.token`；stdin 用 `--params-file -`。正文写入 JSON，不拼 shell。先 `participants.list` 获取精确 ID，`messages.send` 仅发消息，用户明确派活时才 `runs.submit`。重试复用同一幂等键；回执不是完成。
+- MCP 使用 `node bin/connect.mjs mcp`，从 `UNAGENT_CONNECT_TOKEN_FILE` 或 `UNAGENT_CONNECT_TOKEN` 取参与者认证，URL 使用 `UNAGENT_CONNECT_URL`。工具参数不能覆盖身份或注入管理员操作。
+- 受管理 MCP 的父任务和执行凭证来自 `UNAGENT_CONNECT_RUN_ID`、`UNAGENT_CONNECT_EXECUTION_TOKEN`，由程序注入派发和等待。使用 `connect_runs_wait` 等待子任务；程序处理每次最多 25 秒的 RPC，直至完成、需要输入或期限，不自行重复派发来轮询。
+- 审批只能由用户在本机管理页处理。澄清回答针对返回的真实 questionId；失败、interrupted、uncertain 先查看原生状态，不能自动重置或重放未知执行。
+- 安装默认只展示差异，只有用户指定目标并要求安装时才加 `--apply`。校验和不符或目标已有修改时停止，保留现有文件，选择新的目标或交由用户比较。完整参数见 [README.md](README.md)，接口见 [docs/HUB-CONTRACT.md](docs/HUB-CONTRACT.md)。
+
 
 Use this skill when an external agent needs to call a user's explicitly paired UNagent plugin. This skill uses only the local bridge CLI and the selected instance; it does not read Obsidian settings, Vault notes, plugin `data.json`, or API keys.
 
@@ -68,6 +82,10 @@ When `wait` returns `waiting_origin`, answer its exact question ID using `answer
 - 用户只要求了解、总结、比较或读取引用对话时，内置用 sessions_read，外部 CLI 用 call sessions.read；按需读取接口返回的可见 user/assistant 消息。需要更早消息且返回 nextCursor 时，把它原样作为下一次 cursor；已足够回答时停止，不猜游标、不批量转发整段历史。
 - 仅用户明确要求派活时，才用 sessions_send / participants_send（外部为 sessions.send / participants.send）派发任务；读取引用不发送消息、不创建任务、不唤醒目标。
 - 只消费 reader 返回的安全消息投影，不请求、重建或暴露私有字段，例如隐藏推理、系统提示、工具原始参数/结果、运行检查点、执行凭证或认证信息；读取仍服从当前调用者可见范围和权限。
+
+## 文件产物回传
+
+Codex/Claude 若需要返回文件清单，可在最终回复使用完整 JSON 对象 {"text":"简短结果","artifacts":["项目内相对路径"]}。Hub 会实际检查文件存在及路径范围。普通文字回复也有效；没有创建文件时不要编造产物路径。
 
 
 ## 手动接活后的有限续租
