@@ -310,3 +310,35 @@ test('event pages stay below HTTP response bounds without skipping large visible
  let after=0,seen=0;for(let i=0;i<10;i++){const batch=x.hub.events(after,x.actorB);assert.ok(Buffer.byteLength(JSON.stringify(batch))<1024*1024);seen+=batch.events.filter(e=>e.type==='message.created').length;if(batch.nextCursor===after)break;after=batch.nextCursor}
  assert.equal(seen,14)
 })
+
+test('an older root blocked by the project lock cannot deadlock the active root descendant',async t=>{
+ let hub,childActor,childId,entered=false,executeCount=0,allowChild
+ const gate=new Promise(resolve=>{allowChild=resolve})
+ const adapter={id:'codex',capabilities:{automaticExecution:true},cancel:async()=>({stopped:true}),execute:async ctx=>{
+  entered=true;executeCount++;await gate
+  const executionToken=ctx.mcpConfig.env.UNAGENT_CONNECT_EXECUTION_TOKEN,actor={participantId:ctx.participant.id}
+  const child=await hub.call('runs.submit',{recipientId:childActor.participant.id,content:'descendant',idempotencyKey:'descendant',parentRunId:ctx.run.id,executionToken},actor);childId=child.id
+  let result=await hub.call('runs.wait',{runId:child.id,parentRunId:ctx.run.id,executionToken,timeoutMs:0},actor)
+  while(result.status!=='completed'){await sleep(5);result=await hub.call('runs.wait',{runId:child.id,parentRunId:ctx.run.id,executionToken,timeoutMs:20},actor)}
+  return{text:'parent:'+result.result.text}
+ }}
+ let clock=Date.now()
+ const x=await fixture(t,{adapters:[adapter],now:()=>++clock});hub=x.hub
+ const worker=await x.create('managed',{provider:'codex',autoExecute:true});childActor=await x.create('child')
+ await hub.call('participants.update',{id:worker.participant.id,allowedPeers:[childActor.participant.id]},admin)
+ const root=await hub.call('runs.submit',{senderId:x.a.participant.id,recipientId:worker.participant.id,content:'parent',idempotencyKey:'root'},admin)
+ await until(()=>entered,Boolean)
+ const older=await hub.call('runs.submit',{senderId:x.a.participant.id,recipientId:childActor.participant.id,content:'other root',idempotencyKey:'older'},admin)
+ const actor=hub.authenticate(childActor.token)
+ await assert.rejects(hub.call('runs.claim',{runId:older.id,idempotencyKey:'blocked'},actor),{code:'BUSY'})
+ allowChild()
+ await until(()=>hub.call('runs.get',{runId:root.id},admin),r=>r.status==='waiting_dependency')
+ const childClaim=await hub.call('runs.claim',{runId:childId,idempotencyKey:'descendant-claim'},actor)
+ await assert.rejects(hub.call('runs.claim',{runId:older.id,idempotencyKey:'still-blocked'},actor),{code:'BUSY'})
+ await hub.call('runs.complete',{runId:childId,executionToken:childClaim.executionToken,text:'child done'},actor)
+ const done=await until(()=>hub.call('runs.get',{runId:root.id},admin),r=>r.status==='completed')
+ assert.equal(done.result.text,'parent:child done');assert.equal(executeCount,1)
+ const otherClaim=await hub.call('runs.claim',{runId:older.id,idempotencyKey:'after-parent'},actor)
+ await hub.call('runs.complete',{runId:older.id,executionToken:otherClaim.executionToken,text:'other done'},actor)
+ assert.equal(hub.capacity(),0)
+})

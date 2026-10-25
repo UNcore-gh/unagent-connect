@@ -136,13 +136,19 @@ export class Hub {
   }
   capacity(){return this.store.list('run').filter(r=>r.held&&['running','uncertain','interrupted','cancel_requested','paused'].includes(r.status)).length}
   canClaim(r){
-    if(r.status!=='queued'||r.deadlineAt<=this.now()||this.capacity()>=this.maxConcurrent)return false
-    const records=this.store.list('run');if(r.dependencyRunIds.some(d=>this.store.get('run',d)?.status!=='completed'))return false
-    for(const other of records){if(other.id===r.id||!other.held||TERMINAL.has(other.status))continue
-      if(other.recipientId===r.recipientId||other.nativeSessionId&&other.nativeSessionId===r.nativeSessionId)return false
-      if(other.workspace===r.workspace&&!(other.rootRunId===r.rootRunId&&other.status==='waiting_dependency'))return false
+    if(this.capacity()>=this.maxConcurrent)return false
+    const records=this.store.list('run'),now=this.now()
+    const eligible=candidate=>{
+      if(candidate.status!=='queued'||candidate.deadlineAt<=now||candidate.dependencyRunIds.some(d=>this.store.get('run',d)?.status!=='completed'))return false
+      return !records.some(other=>other.id!==candidate.id&&other.held&&!TERMINAL.has(other.status)&&(
+        other.recipientId===candidate.recipientId||other.nativeSessionId&&other.nativeSessionId===candidate.nativeSessionId||
+        other.workspace===candidate.workspace&&!(other.rootRunId===candidate.rootRunId&&other.status==='waiting_dependency')))
     }
-    return !records.some(other=>other.id!==r.id&&other.recipientId===r.recipientId&&other.status==='queued'&&(other.createdAt<r.createdAt||other.createdAt===r.createdAt&&other.id<r.id)&&other.dependencyRunIds.every(d=>this.store.get('run',d)?.status==='completed'))
+    if(!eligible(r))return false
+    // An older root blocked by a held project cannot block the descendant
+    // that must finish to release that project. FIFO applies to eligible work.
+    return !records.some(other=>other.id!==r.id&&other.recipientId===r.recipientId&&
+      (other.createdAt<r.createdAt||other.createdAt===r.createdAt&&other.id<r.id)&&eligible(other))
   }
   claim(r,key,managed){
     assert(this.canClaim(r),'BUSY','Task is not claimable; a prior task, dependency or native lock is active',409)
