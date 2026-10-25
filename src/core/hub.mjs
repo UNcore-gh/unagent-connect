@@ -241,7 +241,9 @@ export class Hub {
         // replace its identity or update a reset/recovered execution.
         const stopReadback=r?.attemptId===attemptId&&r.status==='cancel_requested'&&r.nativeBinding
           &&binding.nativeSessionId===r.nativeSessionId&&binding.nativeBinding?.terminal===true
-          &&stable(binding.nativeBinding)===stable({...r.nativeBinding,terminal:true})
+          // Bindings cross JSON storage; absent and undefined properties have
+          // the same persisted identity. Compare that representation on both sides.
+          &&stable(JSON.parse(JSON.stringify(binding.nativeBinding)))===stable(JSON.parse(JSON.stringify({...r.nativeBinding,terminal:true})))
           &&equalHash(r.cancelCredentialHash,hash(credential))
         if(!stopReadback)r=valid()
         const safe={...(typeof binding.nativeSessionId==='string'?{nativeSessionId:binding.nativeSessionId}:{}),...(binding.nativeBinding?{nativeBinding:binding.nativeBinding}:{})};assert(JSON.stringify(safe).length<16000,'INVALID_OUTPUT','Native binding too large');Object.assign(r,safe);Object.assign(ctx.run,safe);this.store.tx(()=>{this.saveRun(r);this.store.put('binding',{id:participant.id,...safe})})},

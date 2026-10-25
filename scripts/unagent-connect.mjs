@@ -303,7 +303,14 @@ async function commandStop() {
       await getAdminStatus(token)
     } catch (error) {
       if (error instanceof CliError && error.code === 'BRIDGE_UNREACHABLE') {
-        return printJson({ stopped: true, running: false, address: ADDRESS })
+        // The listener closes before the server finishes state/PID cleanup.
+        // Do not report success while its shutdown handler still owns files.
+        try {
+          await stat(PID_PATH)
+        } catch (markerError) {
+          if (markerError?.code !== 'ENOENT') throw markerError
+          return printJson({ stopped: true, running: false, address: ADDRESS })
+        }
       }
     }
     await delay(100)

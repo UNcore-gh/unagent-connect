@@ -483,6 +483,7 @@ test('CLI starts on an explicit port, creates pairing code, reports status, and 
   const stopped = run('stop')
   assert.equal(stopped.status, 0, stopped.stderr)
   assert.equal(JSON.parse(stopped.stdout).stopped, true)
+  await assert.rejects(readFile(path.join(home, 'bridge.pid'), 'utf8'), { code: 'ENOENT' })
 })
 
 for (const sendMethod of ['sessions.send', 'participants.send']) {
@@ -640,4 +641,35 @@ test('client purpose validates 500 characters, participates in registration idem
   assert.equal(list.value.clients.find(c=>c.clientId===first.value.clientId).purpose,'分析资料')
   const boundary=await request(current.base,`/v1/instances/${instance.instanceId}/pair-codes`,{method:'POST',token:instance.instanceToken,body:{purpose:'client'}})
   assert.equal((await register({...body,code:boundary.value.code,registrationId:'bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee',purpose:'🦉'.repeat(500)})).response.status,201)
+})
+
+
+test('close drains active host polling before its state directory is removed', async () => {
+  const { root, home } = await temporaryHome()
+  const { bridge, base } = await start(home)
+  let closed = false
+  try {
+    const { instance, sessionId } = await pairFixture(base, bridge.adminToken)
+    const pending = request(base, `/v1/instances/${instance.instanceId}/next?waitMs=25000`, {
+      token: instance.instanceToken, sessionId,
+    }).catch(() => null)
+    const deadline = Date.now() + 2000
+    let online = false
+    while (!online && Date.now() < deadline) {
+      const status = await request(base, '/v1/admin/instances', { token: bridge.adminToken })
+      online = status.value.instances.some(item => item.instanceId === instance.instanceId && item.online)
+      if (!online) await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    assert.equal(online, true, 'host poll must be active before closing')
+    await bridge.close()
+    closed = true
+    await rm(root, { recursive: true, force: true })
+    await pending
+    // A close callback queued after server.close must not recreate state files.
+    await new Promise(resolve => setImmediate(resolve))
+    await assert.rejects(stat(home), { code: 'ENOENT' })
+  } finally {
+    if (!closed) await bridge.close()
+    await rm(root, { recursive: true, force: true })
+  }
 })

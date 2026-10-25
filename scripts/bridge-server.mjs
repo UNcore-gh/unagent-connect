@@ -67,6 +67,7 @@ export function createBridgeServer({
   let server
   let isClosed = false
   let cleanupTimer = null
+  const activeRequests = new Set()
   const pollWaiters = new Map()
   const connectionGenerations = new Map()
   const retiredSessions = new Map()
@@ -472,7 +473,7 @@ export function createBridgeServer({
       noContent(res)
     }
     res.once('close', () => {
-      if (!res.writableEnded && connectionGenerations.get(instanceId) === generation && instance.activeSessionId === sessionId) {
+      if (!isClosed && !res.writableEnded && connectionGenerations.get(instanceId) === generation && instance.activeSessionId === sessionId) {
         markDisconnected(instanceId, instance)
         void persist().finally(() => notifyPollers(instanceId))
       }
@@ -992,10 +993,11 @@ export function createBridgeServer({
   async function createHandler() {
     const adminToken = await ensureState()
     server = createServer((req, res) => {
-      void route(req, res).catch((error) => {
+      const pending = route(req, res).catch((error) => {
         const exposed = publicError(error)
         fail(res, exposed.status, exposed.code, exposed.message)
-      })
+      }).finally(() => activeRequests.delete(pending))
+      activeRequests.add(pending)
     })
     server.adminToken = adminToken
     return server
@@ -1032,6 +1034,7 @@ export function createBridgeServer({
       server.closeAllConnections?.()
       await closed
     }
+    await Promise.allSettled([...activeRequests])
     await persist(true)
   }
 

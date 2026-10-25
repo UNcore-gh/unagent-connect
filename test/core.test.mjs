@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { Hub } from '../src/core/hub.mjs'
 import { createAdapter as unagent } from '../src/adapters/unagent.mjs'
 const admin={admin:true}
@@ -159,6 +160,33 @@ test('real UNagent stop readback persists after supervision credentials are fenc
  acknowledge({})
  await until(()=>x.hub.call('runs.get',{runId:run.id},admin),r=>r.status==='cancelled')
  assert.equal(x.hub.store.get('run',run.id).nativeBinding.terminal,true);assert.equal(x.hub.capacity(),0)
+})
+test('full UNagent execution accepts late stop readback after JSON drops undefined binding fields',async t=>{
+ let acknowledge,reading=false,stopped=false,worker,x
+ const config={bridgeDir:'/test-connector',instanceId:'test-instance',clientProfile:'test-client',modelId:'test-model'}
+ const native=unagent({pollMs:1,call:async(c,method,p)=>{
+  if(method==='models.list')return[{id:'test-model'}]
+  if(method==='sessions.create')return{id:'native-session'}
+  if(method==='sessions.list')return[{id:'native-session',running:false,queued:0,purpose:'unagent-connect:'+createHash('sha256').update(JSON.stringify([worker.participant.id,fs.realpathSync(x.workspace)])).digest('hex')}]
+  if(method==='sessions.send')return{task:{id:'native-task'}}
+  if(method==='tasks.cancel')return new Promise(resolve=>{acknowledge=()=>{stopped=true;resolve({})}})
+  assert.equal(method,'tasks.get');reading=true
+  return{id:p.taskId,targetSessionId:'native-session',status:stopped?'cancelled':'running'}
+ }})
+ x=await fixture(t,{adapters:[native],cancelTimeoutMs:25})
+ worker=await x.create('managed',{provider:'unagent',autoExecute:true,config})
+ const run=await x.send({senderId:x.a.participant.id,recipientId:worker.participant.id},admin)
+ await until(()=>reading,Boolean)
+ const live=x.hub.active.get(run.id)
+ assert.ok(Object.hasOwn(live.ctx.run.nativeBinding,'answeredQuestionId'))
+ assert.equal(Object.hasOwn(x.hub.store.get('run',run.id).nativeBinding,'answeredQuestionId'),false)
+ await x.hub.call('runs.cancel',{runId:run.id},admin)
+ await until(()=>!x.hub.active.has(run.id),Boolean)
+ assert.equal(x.hub.store.get('run',run.id).credentialHash,undefined)
+ acknowledge()
+ await until(()=>x.hub.call('runs.get',{runId:run.id},admin),r=>r.status==='cancelled')
+ assert.equal(x.hub.store.get('run',run.id).nativeBinding.terminal,true)
+ assert.equal(x.hub.capacity(),0)
 })
 test('late cancellation acknowledgement cannot terminate a reset execution',async t=>{
  let acknowledge,ctx
