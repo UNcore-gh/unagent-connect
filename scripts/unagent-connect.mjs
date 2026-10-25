@@ -469,7 +469,7 @@ async function commandCall(method, options) {
 }
 
 function isDurableSend(method) {
-  return method === 'sessions.send' || method === 'participants.send'
+  return method === 'sessions.send' || method === 'participants.send' || method === 'connect.submit'
 }
 
 function canReplayAfterBridgeRestart(method) {
@@ -717,7 +717,7 @@ function stableStringify(value) {
 }
 
 function withBusinessIdempotencyKey(method, params, idem) {
-  if (!['sessions.send', 'participants.send', 'inbox.claim', 'inbox.complete', 'inbox.fail'].includes(method)) return params
+  if (!['sessions.send', 'participants.send', 'connect.submit', 'inbox.claim', 'inbox.complete', 'inbox.fail'].includes(method)) return params
   const existing = params.idempotencyKey
   if (existing !== undefined && existing !== idem) {
     throw new CliError('params.idempotencyKey 必须与 --idem 使用同一个编号。', 'IDEMPOTENCY_CONFLICT')
