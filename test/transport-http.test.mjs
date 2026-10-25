@@ -31,7 +31,7 @@ async function fixture(t, options = {}) {
 test('HTTP exact host/origin, body bound, login cookie and CSRF; async calls remain awaited', async t => {
   const f = await fixture(t)
   assert.match(f.login.headers.get('set-cookie'), /HttpOnly; SameSite=Strict/)
-  assert.deepEqual(await (await fetch(f.url + '/v1/health')).json(), { version: '0.2.0' })
+  assert.deepEqual(await (await fetch(f.url + '/v1/health')).json(), { version: '0.2.1' })
   const badHost = await new Promise((resolve, reject) => {
     const req = http.get(f.url + '/', {headers:{Host:'localhost:' + new URL(f.url).port}},res=>{res.resume();resolve(res.statusCode)})
     req.on('error',reject)
@@ -46,7 +46,7 @@ test('HTTP exact host/origin, body bound, login cookie and CSRF; async calls rem
   assert.equal((await f.post('/v1/rpc', '{', { Cookie: f.cookie, Origin: f.url })).status, 400)
   const original = f.hub.call.bind(f.hub)
   f.hub.call = async (...args) => { await new Promise(r => setTimeout(r, 10)); return await original(...args) }
-  assert.equal((await f.admin('system.status')).version, '0.2.0')
+  assert.equal((await f.admin('system.status')).version, '0.2.1')
   assert.equal(JSON.parse(await readFile(path.join(f.stateDir, 'connection.json'), 'utf8')).url, f.url)
   assert.equal((await stat(path.join(f.stateDir, 'connection.json'))).mode & 0o777, 0o600)
   assert.equal(f.hub.url, f.url)

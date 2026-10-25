@@ -54,7 +54,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
    if(process.env.FIXTURE_BAD_MCP_KEY==='true'||mode==='invalid-mcp-name') return send({id:m.id,error:{code:-32603,
      message:'error creating thread: required MCP server name contains literal quotes'}});
    if(m.params.approvalPolicy!=='on-request'||m.params.approvalsReviewer!=='user') process.exit(12);
-   thread=m.params.threadId||thread;
+   thread=m.params.threadId||(mode==='new-session'?'different-thread':thread);
    return ok({thread:{id:thread,cwd:m.params.cwd,status:{type:'idle'}}});
  }
  if(m.method==='turn/start') {
@@ -92,7 +92,7 @@ function codexHarness(mode = 'success', overrides = {}) {
     spawn: (command, args, options) => {
       launches.push({ command, args, options });
       return spawn(process.execPath, ['--input-type=module', '-e', nativeFixture], {
-        ...options, env: { ...options.env, FIXTURE_MODE: mode, FIXTURE_CWD: overrides.nativeCwd ?? cwd,
+        ...options, env: { ...options.env, FIXTURE_MODE: Array.isArray(mode) ? mode[launches.length - 1] : mode, FIXTURE_CWD: overrides.nativeCwd ?? cwd,
           FIXTURE_BAD_MCP_KEY: String(args.some(arg => arg.startsWith('mcp_servers."'))) },
       });
     }, ...overrides }) };
@@ -171,6 +171,25 @@ test('Codex refusal is explicit; transport loss/malformed/oversized streams are 
   }
 });
 
+test('Codex admin confirmation releases only the exact uncertain attempt and permits same-session resume', async () => {
+  const { adapter, launches } = codexHarness(['disconnect', 'new-session']), ctx = context();
+  await assert.rejects(adapter.execute(ctx), { code: 'OUTCOME_UNKNOWN' });
+  const original = { ...ctx.run, ...ctx.saved.at(-1) };
+  const foreign = { ...ctx.participant, id: 'another-worker' };
+  assert.deepEqual(adapter.confirmStopped({ run: original, participant: foreign, confirmedStopped: true }), { released: false });
+  await assert.rejects(adapter.execute({ ...ctx, run: { ...original, attemptId: 'attempt-foreign' } }), { code: 'OUTCOME_UNKNOWN' });
+  assert.throws(() => adapter.confirmStopped({ run: original, participant: ctx.participant }), { code: 'CONFIRM_REQUIRED' });
+  assert.throws(() => adapter.confirmStopped({ run: { ...original, attemptId: 'attempt-foreign' }, participant: ctx.participant, confirmedStopped: true }),
+    { code: 'BINDING_UNVERIFIED' });
+  assert.equal(launches.length, 1);
+
+  assert.deepEqual(adapter.confirmStopped({ run: original, participant: ctx.participant, confirmedStopped: true }), { released: true });
+  ctx.run = { ...original, attemptId: 'attempt-2', round: 2 };
+  const result = await adapter.execute(ctx);
+  assert.equal(result.nativeSessionId, original.nativeSessionId);
+  assert.equal(launches.length, 2);
+});
+
 test('Codex existing session must have matching workspace and positive idle evidence', async () => {
   for (const mode of ['busy', 'not-loaded']) {
     const ctx = context(); ctx.run.nativeSessionId = 'user-session';
@@ -234,6 +253,7 @@ function sdkHarness(mode = 'success') {
   let controls;
   const sdk = { query(args) {
     calls.push(args);
+    const queryMode = Array.isArray(mode) ? mode[calls.length - 1] : mode;
     const sessionId = args.options.resume ?? args.options.sessionId;
     const result = extra => ({ type: 'result', subtype: 'success', is_error: false,
       result: 'sdk answer', session_id: sessionId, terminal_reason: 'completed', ...extra });
@@ -241,29 +261,29 @@ function sdkHarness(mode = 'success') {
       const user = await args.prompt.next();
       assert.equal(user.value.message.content, 'Read-only tiny prompt');
       yield { type: 'system', subtype: 'init', session_id: sessionId,
-        mcp_servers: [{ name: 'unagent-connect', status: mode === 'mcp-failed' ? 'failed' : 'connected' }] };
-      if (['approval', 'denial', 'question', 'pending'].includes(mode)) {
-        const answer = await args.options.canUseTool(mode === 'question' ? 'AskUserQuestion' : 'Write',
-          mode === 'question' ? { questions: [{ question: 'Which scope?' }] } : { file_path: 'example.txt', content: 'x' },
+        mcp_servers: [{ name: 'unagent-connect', status: queryMode === 'mcp-failed' ? 'failed' : 'connected' }] };
+      if (['approval', 'denial', 'question', 'pending'].includes(queryMode)) {
+        const answer = await args.options.canUseTool(queryMode === 'question' ? 'AskUserQuestion' : 'Write',
+          queryMode === 'question' ? { questions: [{ question: 'Which scope?' }] } : { file_path: 'example.txt', content: 'x' },
           { signal: new AbortController().signal, toolUseID: 'tool-1' });
         controls.permission = answer;
       }
-      if (mode === 'parallel-approval') controls.permissions = await Promise.all([1,2].map(n => args.options.canUseTool('Write',
+      if (queryMode === 'parallel-approval') controls.permissions = await Promise.all([1,2].map(n => args.options.canUseTool('Write',
         { file_path: 'example-'+n+'.txt', content: 'x' }, { signal: new AbortController().signal, toolUseID:'tool-'+n })));
-      if (['wait', 'ack-only', 'pending'].includes(mode)) await gate.promise;
-      if (controls.interrupted && mode !== 'ack-only') { yield result({ subtype: 'error_during_execution', is_error: true, terminal_reason: 'aborted_tools' }); return; }
-      if (mode === 'no-result') return;
-      if (mode === 'throw') throw new Error('native lost');
-      if (mode === 'oversized') { yield { type: 'assistant', session_id: sessionId, message: { content: [{ type: 'text', text: 'x'.repeat(LIMIT + 1) }] } }; return; }
-      if (mode === 'wrong-session') { yield result({ session_id: 'unrelated-user-session' }); return; }
-      if (mode === 'failed') { yield result({ subtype: 'error_max_turns', is_error: true, terminal_reason: 'max_turns' }); return; }
-      if (mode === 'incomplete') { yield result({ terminal_reason: 'blocking_limit' }); return; }
+      if (['wait', 'ack-only', 'pending'].includes(queryMode)) await gate.promise;
+      if (controls.interrupted && queryMode !== 'ack-only') { yield result({ subtype: 'error_during_execution', is_error: true, terminal_reason: 'aborted_tools' }); return; }
+      if (queryMode === 'no-result') return;
+      if (queryMode === 'throw') throw new Error('native lost');
+      if (queryMode === 'oversized') { yield { type: 'assistant', session_id: sessionId, message: { content: [{ type: 'text', text: 'x'.repeat(LIMIT + 1) }] } }; return; }
+      if (queryMode === 'wrong-session') { yield result({ session_id: 'unrelated-user-session' }); return; }
+      if (queryMode === 'failed') { yield result({ subtype: 'error_max_turns', is_error: true, terminal_reason: 'max_turns' }); return; }
+      if (queryMode === 'incomplete') { yield result({ terminal_reason: 'blocking_limit' }); return; }
       yield { type: 'assistant', session_id: sessionId, message: { content: [{ type: 'thinking', thinking: 'never emit hidden reasoning' }, { type: 'text', text: 'public answer' }] } };
       yield result();
     })();
     controls = { permission: null, interrupted: false, closed: false,
       next: (...a) => iterator.next(...a),
-      interrupt: async () => { controls.interrupted = true; if (mode !== 'ack-only') gate.resolve(); },
+      interrupt: async () => { controls.interrupted = true; if (queryMode !== 'ack-only') gate.resolve(); },
       close: () => { controls.closed = true; gate.resolve(); },
     };
     return controls;
@@ -328,6 +348,22 @@ test('Claude explicit failures never succeed; missing/mismatched/oversized resul
       assert.equal(h.calls.length, 1);
     }
   }
+});
+
+test('Claude admin confirmation releases the exact uncertain turn and resumes its dedicated session', async () => {
+  const h = sdkHarness(['throw', 'success']), ctx = context();
+  await assert.rejects(h.adapter.execute(ctx), { code: 'OUTCOME_UNKNOWN' });
+  const original = { ...ctx.run, ...ctx.saved[0] };
+  assert.throws(() => h.adapter.confirmStopped({ run: original, participant: ctx.participant }), { code: 'CONFIRM_REQUIRED' });
+  assert.throws(() => h.adapter.confirmStopped({ run: { ...original, attemptId: 'attempt-foreign' }, participant: ctx.participant, confirmedStopped: true }),
+    { code: 'BINDING_UNVERIFIED' });
+  assert.equal(h.calls.length, 1);
+  assert.deepEqual(h.adapter.confirmStopped({ run: original, participant: ctx.participant, confirmedStopped: true }), { released: true });
+  ctx.run = { ...original, attemptId: 'attempt-2', round: 2 };
+  const result = await h.adapter.execute(ctx);
+  assert.equal(result.nativeSessionId, original.nativeSessionId);
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.calls[1].options.resume, original.nativeSessionId);
 });
 
 test('Claude failed scoped MCP cannot be reported as successful execution', async () => {
@@ -397,6 +433,8 @@ test('Claude interrupt result proves termination, ACK alone remains unknown', as
     const h = sdkHarness(mode), ctx = context();
     const check = assert.rejects(h.adapter.execute(ctx), { code: mode === 'wait' ? 'CANCELLED' : 'OUTCOME_UNKNOWN' });
     await until(() => h.calls.length > 0);
+    assert.throws(() => h.adapter.confirmStopped({ run: { ...ctx.run, ...ctx.saved[0] }, participant: ctx.participant, confirmedStopped: true }),
+      { code: 'SESSION_BUSY' });
     assert.deepEqual(await h.adapter.cancel({ ...ctx, run: { ...ctx.run, attemptId: 'stale' } }), { stopped: false });
     ctx.controller.abort();
     assert.equal((await h.adapter.cancel(ctx)).stopped, mode === 'wait');

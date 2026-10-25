@@ -16,7 +16,7 @@ test('CLI stdin/file RPC has no shell interpretation; status and legacy routing 
  const text='literal $(touch should-not-exist) `echo bad` ; <script>用户正文</script>\n下一行'
  const paramsFile=path.join(stateDir,'params.json');await writeFile(paramsFile,JSON.stringify({recipientId:a.participant.id,content:text,idempotencyKey:'cli-message'}))
  result=await run(['rpc','messages.send','--params-file',paramsFile,'--token-file',tokenFile,'--url',server.origin]);assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).message.content,text)
- result=await run(['status','--url',server.origin]);assert.equal(result.code,0);assert.equal(JSON.parse(result.stdout).version,'0.2.0')
+ result=await run(['status','--url',server.origin]);assert.equal(result.code,0);assert.equal(JSON.parse(result.stdout).version,'0.2.1')
  result=await run(['legacy','--help']);assert.equal(result.code,0,result.stderr);assert.match(result.stdout,/pair|配对|client|UNagent/)
  result=await run(['rpc','participants.list','--url','http://example.com'],'{}');assert.notEqual(result.code,0)
  for(const url of ['http://localhost:18492','http://127.0.0.1:18492/?token=x','http://u:p@127.0.0.1:18492','https://127.0.0.1:18492','http://127.0.0.1:18492/else'])assert.throws(()=>localURL(url))

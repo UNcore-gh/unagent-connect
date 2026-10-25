@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { Hub } from '../src/core/hub.mjs'
+import { createAdapter as claude } from '../src/adapters/claude.mjs'
 import { createAdapter as unagent } from '../src/adapters/unagent.mjs'
 const admin={admin:true}
 const sleep=ms=>new Promise(r=>setTimeout(r,ms))
@@ -115,13 +116,14 @@ test('native approval blocks on local-user answer and preserves project lock',as
  const done=await until(()=>x.hub.call('runs.get',{runId:run.id},admin),r=>r.status==='completed');assert.equal(done.result.text,'denied')
 })
 test('failed cancellation keeps native lock until stop evidence or explicit reset',async t=>{
- let nativeResolve
- const adapter={id:'codex',capabilities:{automaticExecution:true},health:async()=>({state:'available'}),execute:async()=>new Promise(resolve=>{nativeResolve=resolve}),cancel:async()=>({stopped:false})}
+ let nativeResolve,resetCalls=0
+ const adapter={id:'codex',capabilities:{automaticExecution:true},health:async()=>({state:'available'}),execute:async()=>new Promise(resolve=>{nativeResolve=resolve}),cancel:async()=>({stopped:false}),confirmStopped:()=>{resetCalls++}}
  const x=await fixture(t,{adapters:[adapter]});const worker=await x.create('managed',{provider:'codex',autoExecute:true})
  const r=await x.hub.call('runs.submit',{senderId:x.a.participant.id,recipientId:worker.participant.id,content:'work',idempotencyKey:'work'},admin)
  await until(()=>x.hub.call('runs.get',{runId:r.id},admin),r=>r.status==='running')
  assert.equal((await x.hub.call('runs.cancel',{runId:r.id},admin)).status,'cancel_requested')
  await assert.rejects(x.hub.call('runs.reset',{runId:r.id,confirmStopped:true},admin),{code:'BUSY'})
+ assert.equal(resetCalls,0)
  const other=await x.send();await assert.rejects(x.hub.call('runs.claim',{runId:other.id,idempotencyKey:'take'},x.actorB),{code:'BUSY'})
  nativeResolve({text:'stopped'});await until(()=>x.hub.call('runs.get',{runId:r.id},admin),r=>r.status==='cancelled')
  assert.ok(await x.hub.call('runs.claim',{runId:other.id,idempotencyKey:'take'},x.actorB))
@@ -145,33 +147,35 @@ test('unresponsive cancellation is bounded, deduplicated and retains locks until
  assert.ok(await x.hub.call('runs.claim',{runId:other.id,idempotencyKey:'take'},x.actorB))
 })
 test('real UNagent stop readback persists after supervision credentials are fenced',async t=>{
- let acknowledge,ctx
+ let acknowledge,ctx,proofState='pending'
  const config={bridgeDir:'/test-connector',instanceId:'test-instance',clientProfile:'test-client'}
  const native=unagent({call:async(c,method,p)=>{
-  if(method==='tasks.cancel')return new Promise(resolve=>{acknowledge=resolve})
-  assert.equal(method,'tasks.get');return{id:p.taskId,targetSessionId:'native-session',status:'cancelled'}
+  if(method==='tasks.cancel')return new Promise(resolve=>{acknowledge=()=>{proofState='stopped';resolve({})}})
+  assert.equal(method,'tasks.get');return{id:p.taskId,targetSessionId:'native-session',status:'cancelled',stopConfirmation:{taskId:p.taskId,targetSessionId:'native-session',state:proofState,...(proofState==='stopped'?{confirmedAt:Date.now()}:{})}}
  }})
  const adapter={...native,execute:async value=>{ctx=value;ctx.saveBinding({nativeSessionId:'native-session',nativeBinding:{provider:'unagent',workspace:ctx.run.workspace,participantId:ctx.participant.id,attemptId:ctx.run.attemptId,sessionId:'native-session',taskId:'native-task',...config,terminal:false}});return new Promise((resolve,reject)=>ctx.signal.addEventListener('abort',()=>reject(Object.assign(new Error('Supervision ended'),{code:'OUTCOME_UNKNOWN'})),{once:true}))}}
  const x=await fixture(t,{adapters:[adapter],cancelTimeoutMs:25});const worker=await x.create('managed',{provider:'unagent',autoExecute:true,config})
  const run=await x.send({senderId:x.a.participant.id,recipientId:worker.participant.id},admin);await until(()=>ctx?.run.nativeBinding,Boolean)
  await x.hub.call('runs.cancel',{runId:run.id},admin);await until(()=>!x.hub.active.has(run.id),Boolean)
  assert.equal(x.hub.store.get('run',run.id).credentialHash,undefined)
+ assert.equal((await x.hub.call('runs.get',{runId:run.id},admin)).status,'cancel_requested')
+ assert.equal(x.hub.capacity(),1,'pending stop proof must retain the native lock')
  assert.throws(()=>ctx.saveBinding({nativeSessionId:'foreign',nativeBinding:{...ctx.run.nativeBinding,sessionId:'foreign',terminal:true}}),{code:'STALE_EXECUTION'})
  acknowledge({})
  await until(()=>x.hub.call('runs.get',{runId:run.id},admin),r=>r.status==='cancelled')
  assert.equal(x.hub.store.get('run',run.id).nativeBinding.terminal,true);assert.equal(x.hub.capacity(),0)
 })
 test('full UNagent execution accepts late stop readback after JSON drops undefined binding fields',async t=>{
- let acknowledge,reading=false,stopped=false,worker,x
+ let acknowledge,reading=false,cancelRequested=false,proofState='pending',worker,x
  const config={bridgeDir:'/test-connector',instanceId:'test-instance',clientProfile:'test-client',modelId:'test-model'}
  const native=unagent({pollMs:1,call:async(c,method,p)=>{
   if(method==='models.list')return[{id:'test-model'}]
   if(method==='sessions.create')return{id:'native-session'}
   if(method==='sessions.list')return[{id:'native-session',running:false,queued:0,purpose:'unagent-connect:'+createHash('sha256').update(JSON.stringify([worker.participant.id,fs.realpathSync(x.workspace)])).digest('hex')}]
   if(method==='sessions.send')return{task:{id:'native-task'}}
-  if(method==='tasks.cancel')return new Promise(resolve=>{acknowledge=()=>{stopped=true;resolve({})}})
+  if(method==='tasks.cancel')return new Promise(resolve=>{cancelRequested=true;acknowledge=()=>{proofState='stopped';resolve({})}})
   assert.equal(method,'tasks.get');reading=true
-  return{id:p.taskId,targetSessionId:'native-session',status:stopped?'cancelled':'running'}
+  return{id:p.taskId,targetSessionId:'native-session',status:cancelRequested?'cancelled':'running',...(cancelRequested?{stopConfirmation:{taskId:p.taskId,targetSessionId:'native-session',state:proofState,...(proofState==='stopped'?{confirmedAt:Date.now()}:{})}}:{})}
  }})
  x=await fixture(t,{adapters:[native],cancelTimeoutMs:25})
  worker=await x.create('managed',{provider:'unagent',autoExecute:true,config})
@@ -183,10 +187,37 @@ test('full UNagent execution accepts late stop readback after JSON drops undefin
  await x.hub.call('runs.cancel',{runId:run.id},admin)
  await until(()=>!x.hub.active.has(run.id),Boolean)
  assert.equal(x.hub.store.get('run',run.id).credentialHash,undefined)
+ assert.equal(x.hub.store.get('run',run.id).status,'cancel_requested')
+ assert.equal(x.hub.capacity(),1,'cancelled with pending proof must not free capacity')
  acknowledge()
  await until(()=>x.hub.call('runs.get',{runId:run.id},admin),r=>r.status==='cancelled')
  assert.equal(x.hub.store.get('run',run.id).nativeBinding.terminal,true)
  assert.equal(x.hub.capacity(),0)
+})
+test('legacy UNagent cancelled readback without proof is bounded and keeps the Hub lock',async t=>{
+ let ctx,cancelled=false,reads=0,worker,x
+ const config={bridgeDir:'/test-connector',instanceId:'test-instance',clientProfile:'legacy-client',modelId:'test-model'}
+ const native=unagent({pollMs:10000,call:async(c,method,p)=>{
+  if(method==='models.list')return[{id:'test-model'}]
+  if(method==='sessions.create')return{id:'native-session'}
+  if(method==='sessions.list')return[{id:'native-session',running:false,queued:0,purpose:'unagent-connect:'+createHash('sha256').update(JSON.stringify([worker.participant.id,fs.realpathSync(x.workspace)])).digest('hex')}]
+  if(method==='sessions.send')return{task:{id:'native-task'}}
+  if(method==='tasks.cancel'){cancelled=true;return{requested:true}}
+  assert.equal(method,'tasks.get');reads++
+  return{id:p.taskId,targetSessionId:'native-session',status:cancelled?'cancelled':'running'}
+ }})
+ const adapter={...native,execute:async value=>{ctx=value;return native.execute(value)}}
+ x=await fixture(t,{adapters:[adapter],cancelTimeoutMs:25});worker=await x.create('managed',{provider:'unagent',autoExecute:true,config})
+ const run=await x.send({senderId:x.a.participant.id,recipientId:worker.participant.id},admin)
+ await until(()=>ctx?.run.nativeBinding,Boolean)
+ await x.hub.call('runs.cancel',{runId:run.id},admin)
+ await until(()=>!x.hub.active.has(run.id),Boolean)
+ const stopped=await x.hub.call('runs.get',{runId:run.id},admin)
+ assert.equal(stopped.status,'cancel_requested')
+ assert.equal(x.hub.capacity(),1)
+ assert.equal(x.hub.store.get('run',run.id).nativeBinding.terminal,false)
+ const readsAfterStop=reads;await sleep(40)
+ assert.equal(reads,readsAfterStop,'read must stop immediately instead of polling an old connector forever')
 })
 test('late cancellation acknowledgement cannot terminate a reset execution',async t=>{
  let acknowledge,ctx
@@ -244,6 +275,35 @@ test('native recovery queries saved attempt and never resubmits uncertain work',
  await until(()=>x.hub.call('runs.get',{runId:r.id},admin),r=>r.status==='uncertain')
  await x.hub.call('runs.recover',{runId:r.id},admin)
  const done=await until(()=>x.hub.call('runs.get',{runId:r.id},admin),r=>r.status==='completed');assert.equal(done.result.text,'original result');assert.equal(executes,1);assert.equal(queries,1)
+})
+test('admin confirmed reset releases Claude uncertainty and resumes the original session',async t=>{
+ let queries=0;const starts=[]
+ const sdk={query({options}){
+  queries++;const sessionId=options.resume??options.sessionId;starts.push({sessionId,resume:options.resume});let yielded=false
+  return{next:async()=>{
+   if(queries===1)throw new Error('native response lost')
+   if(yielded)return{done:true};yielded=true
+   return{done:false,value:{type:'result',session_id:sessionId,subtype:'success',is_error:false,terminal_reason:'completed',result:'resumed safely'}}
+  },interrupt:async()=>{},close(){}}
+ }}
+ const adapter=claude({loadSDK:async()=>sdk});const x=await fixture(t,{adapters:[adapter]})
+ const worker=await x.create('Claude worker',{provider:'claude',autoExecute:true})
+ await x.hub.call('participants.update',{id:x.a.participant.id,allowedPeers:[worker.participant.id]},admin)
+ const run=await x.hub.call('runs.submit',{senderId:x.a.participant.id,recipientId:worker.participant.id,content:'continue safely',idempotencyKey:'claude-reset'},admin)
+ const uncertain=await until(()=>x.hub.call('runs.get',{runId:run.id},admin),value=>value.status==='uncertain')
+ const original=x.hub.store.get('run',run.id)
+ await assert.rejects(x.hub.call('runs.reset',{runId:run.id,confirmStopped:true},x.hub.authenticate(worker.token)),{code:'FORBIDDEN'})
+ await assert.rejects(x.hub.call('runs.reset',{runId:run.id,confirmStopped:false},admin),{code:'CONFIRM_REQUIRED'})
+ const participant=x.hub.store.get('participant',worker.participant.id)
+ const replay={run:{...original,attemptId:'probe-attempt'},participant,signal:new AbortController().signal,saveBinding:async()=>{},emit(){},ask:async()=>{}}
+ await assert.rejects(adapter.execute(replay),{code:'OUTCOME_UNKNOWN'})
+ assert.equal(queries,1);assert.equal(uncertain.nativeSessionId,original.nativeSessionId)
+
+ const reset=await x.hub.call('runs.reset',{runId:run.id,confirmStopped:true},admin)
+ assert.notEqual(reset.attemptId,original.attemptId);assert.equal(reset.nativeSessionId,original.nativeSessionId)
+ const done=await until(()=>x.hub.call('runs.get',{runId:run.id},admin),value=>value.status==='completed')
+ assert.equal(done.result.text,'resumed safely');assert.equal(queries,2)
+ assert.equal(starts[1].resume,original.nativeSessionId);assert.equal(starts[1].sessionId,original.nativeSessionId)
 })
 test('event pages stay below HTTP response bounds without skipping large visible records',async t=>{
  const x=await fixture(t);for(let n=0;n<14;n++)await x.hub.call('messages.send',{recipientId:x.b.participant.id,content:'x'.repeat(99999),idempotencyKey:'large'+n},x.actorA)

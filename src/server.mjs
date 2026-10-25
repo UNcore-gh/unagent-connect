@@ -35,7 +35,7 @@ function json(res, status, value) {
 }
 
 /** Hub owns authorization and state; transport never fabricates participant actors. */
-export function createHubServer({ hub, port = 18492, stateDir = DEFAULT_STATE_DIR, version = '0.2.0', maxStreams = 32, streamLifetimeMs = 300000 } = {}) {
+export function createHubServer({ hub, port = 18492, stateDir = DEFAULT_STATE_DIR, version = '0.2.1', maxStreams = 32, streamLifetimeMs = 300000 } = {}) {
   if (!hub || !Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid hub/port')
   let origin, connectionFile, connectionBytes
   const sessions = new Map(), streams = new Set()

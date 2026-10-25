@@ -136,7 +136,7 @@ async function helper(provider, dir, operation, params) {
     throw fault('INVALID_OPERATION', 'Unsupported WorkBuddy operation');
   const { Client } = await moduleAt('node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js');
   const { StdioClientTransport } = await moduleAt('node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js');
-  const client = new Client({ name: 'unagent-connect-native', version: '0.2.0' });
+  const client = new Client({ name: 'unagent-connect-native', version: '0.2.1' });
   const transport = new StdioClientTransport({ command: path.join(dir, 'bin/workbuddy-gateway'), cwd: dir,
     env: Object.fromEntries(Object.entries(process.env).filter(([, value]) => typeof value === 'string')), stderr: 'ignore' });
   try {

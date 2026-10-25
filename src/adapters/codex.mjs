@@ -34,9 +34,31 @@ function settings(config, cwd) {
 }
 
 export function createAdapter(options = {}) {
-  const active = new Map(), sessions = new Map(), uncertain = new Set();
+  const active = new Map(), sessions = new Map(), uncertain = new Map();
   const stopMs = options.stopTimeoutMs ?? 5000;
   const makeRpc = options.rpcFactory ?? ((command, args, opts) => new NativeRpc(command, args, opts));
+  const sessionKey = (participantId, cwd, sessionId) => JSON.stringify([participantId, cwd, sessionId]);
+
+  function confirmStopped(ctx) {
+    if (ctx?.confirmedStopped !== true) throw failure('CONFIRM_REQUIRED', 'Confirm native execution stopped before releasing its session lock');
+    const run = ctx.run, participant = ctx.participant, nativeBinding = run?.nativeBinding;
+    if (!participant || !run || !nativeBinding || nativeBinding.adapter !== 'codex' ||
+        nativeBinding.participantId !== participant.id || nativeBinding.workspace !== run.workspace ||
+        nativeBinding.nativeSessionId !== run.nativeSessionId || nativeBinding.dedicated !== true) return { released: false };
+    const key = sessionKey(participant.id, nativeBinding.workspace, nativeBinding.nativeSessionId);
+    if ([...active.entries()].some(([attempt, s]) => attempt === attemptKey(ctx) || s.sessionKey === key)) {
+      throw failure('SESSION_BUSY', 'Codex session still has an active execution');
+    }
+    const lock = uncertain.get(key);
+    if (!lock) return { released: false };
+    if (lock.attemptId !== run.attemptId || lock.nativeBinding.adapter !== nativeBinding.adapter ||
+        lock.nativeBinding.participantId !== nativeBinding.participantId || lock.nativeBinding.workspace !== nativeBinding.workspace ||
+        lock.nativeBinding.nativeSessionId !== nativeBinding.nativeSessionId || lock.nativeBinding.dedicated !== true) {
+      throw failure('BINDING_UNVERIFIED', 'Codex uncertainty belongs to a different native binding or run attempt');
+    }
+    uncertain.delete(key);
+    return { released: true };
+  }
 
   async function cancel(ctx) {
     const s = active.get(attemptKey(ctx));
@@ -62,7 +84,7 @@ export function createAdapter(options = {}) {
         return { state: 'available', version, message: 'Codex CLI found; login and project execution still require acceptance testing.' };
       } catch { return { state: 'needs_setup', message: 'Codex CLI is unavailable or did not answer the version probe.' }; }
     },
-    cancel,
+    cancel, confirmStopped,
     async execute(ctx) {
       const cwd = await workspace(ctx), config = ctx.participant.config ?? {};
       const duration = deadline(ctx, options.maxRunMs);
@@ -71,14 +93,14 @@ export function createAdapter(options = {}) {
       const key = projectKey(ctx, cwd), cached = sessions.get(key);
       const resumeId = ctx.run.nativeSessionId ?? config.nativeSessionId ?? cached?.nativeSessionId;
       if (resumeId) id(resumeId);
-      if (resumeId && uncertain.has(resumeId)) throw failure('OUTCOME_UNKNOWN', 'Codex session has an unresolved previous outcome; do not resubmit');
+      if (resumeId && uncertain.has(sessionKey(ctx.participant.id, cwd, resumeId))) throw failure('OUTCOME_UNKNOWN', 'Codex session has an unresolved previous outcome; do not resubmit');
       const priorBinding = ctx.run.nativeBinding ?? cached;
       if (resumeId && priorBinding && !owned(priorBinding, 'codex', ctx, cwd, resumeId)) {
         throw failure('BINDING_UNVERIFIED', 'Codex binding belongs to a different participant or project');
       }
       const releases = [reserve(`codex:project:${key}`)];
       let rpc, timer, onAbort;
-      const s = { admitted: false, turnId: null, sessionId: resumeId, terminal: null, finished: deferred(),
+      const s = { admitted: false, turnId: null, sessionId: resumeId, sessionKey: resumeId ? sessionKey(ctx.participant.id, cwd, resumeId) : null, terminal: null, finished: deferred(),
         outcome: deferred(), questions: new AbortController(), cancelRequested: false, early: [], earlyBytes: 0,
         messages: new Map(), outputBytes: 0, requests: new Set(), fileChanges: new Map(), changeBytes: 0 };
       const fail = e => s.outcome.reject(e);
@@ -184,7 +206,7 @@ export function createAdapter(options = {}) {
           if (!result.stopped) fail(failure(s.admitted ? 'OUTCOME_UNKNOWN' : 'CANCELLED', 'Native stop has no matching terminal evidence'));
         }).catch(fail); };
         ctx.signal?.addEventListener('abort', onAbort, { once: true });
-        await rpc.request('initialize', { clientInfo: { name: 'unagent_connect', title: 'UNagent Connect', version: '0.2.0' },
+        await rpc.request('initialize', { clientInfo: { name: 'unagent_connect', title: 'UNagent Connect', version: '0.2.1' },
           capabilities: { optOutNotificationMethods: ['item/reasoning/textDelta', 'item/reasoning/summaryTextDelta', 'item/agentMessage/delta'] } });
         rpc.notify('initialized');
         if (s.cancelRequested) throw failure('CANCELLED', 'Cancelled before native session');
@@ -200,6 +222,7 @@ export function createAdapter(options = {}) {
           { ...nativeSettings, ...(resumeId ? { threadId: resumeId, excludeTurns: true } : { ephemeral: false }) });
         s.sessionId = id(result?.thread?.id);
         if (resumeId && s.sessionId !== resumeId) throw failure('NATIVE_PROTOCOL', 'Native resume returned a different thread');
+        s.sessionKey = sessionKey(ctx.participant.id, cwd, s.sessionId);
         if (!resumeId) releases.push(reserve(`codex:session:${s.sessionId}`));
         s.nativeBinding = binding('codex', ctx, cwd, s.sessionId);
         await ctx.saveBinding({ nativeSessionId: s.sessionId, nativeBinding: s.nativeBinding });
@@ -225,7 +248,7 @@ export function createAdapter(options = {}) {
         return { ...nativeResult([...s.messages.values()]), nativeSessionId: s.sessionId, nativeBinding: s.nativeBinding };
       } catch (e) {
         if (s.admitted && !s.terminal) {
-          if (s.sessionId) uncertain.add(s.sessionId);
+          if (s.sessionId && s.nativeBinding) uncertain.set(s.sessionKey, { attemptId: ctx.run.attemptId, nativeBinding: s.nativeBinding });
           throw failure('OUTCOME_UNKNOWN', 'Codex execution was admitted but its terminal outcome is unconfirmed');
         }
         throw e;

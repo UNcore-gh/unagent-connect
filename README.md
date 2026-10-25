@@ -64,6 +64,6 @@ node scripts/check.mjs
 
 ## 验收边界
 
-0.2.0 当前为开发预览；查看 [支持与实测矩阵](docs/SUPPORT.md)。已跑通真实 UNagent → Codex → Claude → UNagent 往返，WorkBuddy 原生回复及原任务回读恢复。Harness 本机缺少已注册桥接且当前 App 版本不在已验证范围，因此明确未验收，不自动修改 profile。
+0.2.1 为本轮正式修复包；查看 [支持与实测矩阵](docs/SUPPORT.md)。已跑通真实 UNagent → Codex → Claude → UNagent 往返，WorkBuddy 原生回复及原任务回读恢复。Harness 本机缺少已注册桥接且当前 App 版本不在已验证范围，因此明确未验收，不自动修改 profile。
 
 遇到 interrupted/uncertain，先在管理页“查询原执行结果”，只查保存的原生编号，不重派。适配器不支持查询时会明确拒绝；确认原执行已停止后才考虑重置。

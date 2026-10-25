@@ -66,7 +66,7 @@ export class Hub {
     const p=object(input)
     for(const forbidden of ['actor','origin','sourceId','sourceSessionId','credentialHash','tokenHash'])assert(!(forbidden in p),'FORBIDDEN',`Caller cannot supply ${forbidden}`,403)
     if(method==='adapters.health'){this.admin(actor);const a=this.adapters.get(p.id);assert(a,'NOT_FOUND','Adapter not installed',404);return a.health(this.config(p.config))}
-    if(method==='system.status'){this.admin(actor);return {version:'0.2.0',participants:this.store.list('participant').map(p=>({...publicParticipant(p),config: p.config})),runs:this.store.list('run').map(publicRun),adapters:[{id:'manual',capabilities:{manualMessaging:true,automaticExecution:false}},...[...this.adapters.values()].map(a=>({id:a.id,capabilities:a.capabilities}))]}}
+    if(method==='system.status'){this.admin(actor);return {version:'0.2.1',participants:this.store.list('participant').map(p=>({...publicParticipant(p),config: p.config})),runs:this.store.list('run').map(publicRun),adapters:[{id:'manual',capabilities:{manualMessaging:true,automaticExecution:false}},...[...this.adapters.values()].map(a=>({id:a.id,capabilities:a.capabilities}))]}}
     if(method==='runs.wait')return this.wait(p,actor)
     if(method==='runs.cancel')return this.cancel(p,actor)
     if(method==='runs.recover')return this.recover(p,actor)
@@ -113,7 +113,9 @@ export class Hub {
       case 'runs.rework':return this.rework(p,actor)
       case 'runs.reset': {
         this.admin(actor);keys(p,['runId','confirmStopped']);const r=this.run(p.runId,actor);assert(p.confirmStopped===true,'CONFIRM_REQUIRED','Confirm native execution stopped before resetting');assert(['interrupted','uncertain','cancel_requested','paused'].includes(r.status),'INVALID_STATE','Only interrupted/uncertain tasks may be reset');assert(!this.active.has(r.id),'BUSY','Native adapter is still active; stop it before resetting',409)
-        r.status='queued';r.held=false;r.managed=false;r.error=undefined;r.credential=undefined;r.credentialHash=undefined;r.question=undefined;r.deadlineAt=this.now()+1800000;r.attemptId=id('attempt');this.cancelQuestions(r.id);return publicRun(this.saveRun(r))
+        const participant=this.participant(r.recipientId),adapter=this.adapters.get(participant.provider)
+        adapter?.confirmStopped?.({run:structuredClone(r),participant:structuredClone(participant),confirmedStopped:true})
+        r.status='queued';r.held=false;r.managed=false;r.error=undefined;r.credential=undefined;r.credentialHash=undefined;r.question=undefined;r.deadlineAt=this.now()+1800000;r.attemptId=id('attempt');this.cancelQuestions(r.id);const reset=this.saveRun(r);this.schedule();return publicRun(reset)
       }
       case 'questions.ask':return this.openQuestion(p,actor)
       case 'questions.answer':return this.answerQuestion(p,actor)

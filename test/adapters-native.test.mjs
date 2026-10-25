@@ -115,14 +115,54 @@ test('UNagent rejects foreign project scope, busy existing sessions and wrong ca
     await assert.rejects(a.execute(f.ctx)); assert.equal(sent, false);
   }
 });
-test('cancel unblocks outstanding UNagent question and needs terminal evidence', async () => {
-  const f = context(uaConfig); let cancelled = false, questionStarted;
+test('UNagent cancellation requires a task-and-session-matched stop proof', async () => {
+  const f = context(uaConfig); let cancelled = false, status = 'waiting_origin', stopConfirmation, runtimeSegmentProof, questionStarted;
   const started = new Promise(resolve => { questionStarted = resolve; });
   f.ctx.ask = () => { questionStarted(); return new Promise(() => {}); };
-  const mock = uaMock(f, p => ({ id: p.taskId, status: cancelled ? 'cancelled' : 'waiting_origin', question: { questionId: 'q', text: 'pending' } }));
-  const a = unagent({ call: async (...args) => { if (args[1] === 'tasks.cancel') cancelled = true; return mock.call(...args); } });
+  const mock = uaMock(f, p => ({ id: p.taskId, targetSessionId: 's1', status,
+    ...(stopConfirmation ? { stopConfirmation } : {}), ...(runtimeSegmentProof ? { runtimeSegmentProof } : {}),
+    question: { questionId: 'q', text: 'pending' } }));
+  const a = unagent({ call: async (...args) => { if (args[1] === 'tasks.cancel' && status === 'waiting_origin') { cancelled = true; status = 'cancelled'; } return mock.call(...args); } });
   const execution = a.execute(f.ctx); const rejection = assert.rejects(execution, { code: 'OUTCOME_UNKNOWN' });
-  await started; assert.deepEqual(await a.cancel(f.ctx), { stopped: true }); await rejection;
+  await started;
+  assert.deepEqual(await a.cancel(f.ctx), { stopped: false }, 'legacy cancelled status alone must not release the Hub placeholder');
+  stopConfirmation = { taskId: 'wrong-task', targetSessionId: 's1', state: 'stopped', confirmedAt: Date.now() };
+  assert.deepEqual(await a.cancel(f.ctx), { stopped: false }, 'proof for another task must not be accepted');
+  stopConfirmation = { taskId: 't1', targetSessionId: 'wrong-session', state: 'stopped', confirmedAt: Date.now() };
+  assert.deepEqual(await a.cancel(f.ctx), { stopped: false }, 'proof for another session must not be accepted');
+  stopConfirmation = { taskId: 't1', targetSessionId: 's1', state: 'stopped', confirmedAt: Date.now() };
+  assert.deepEqual(await a.cancel(f.ctx), { stopped: true });
+  status = 'failed'; stopConfirmation = undefined;
+  runtimeSegmentProof = { taskId: 't1', targetSessionId: 's1', segmentId: 'segment-1', state: 'pending' };
+  assert.deepEqual(await a.cancel(f.ctx), { stopped: false }, 'failed status while its runtime segment is pending is not stop evidence');
+  runtimeSegmentProof = { taskId: 't1', targetSessionId: 's1', segmentId: 'segment-1', state: 'ended', endedAt: Date.now() };
+  assert.deepEqual(await a.cancel(f.ctx), { stopped: true }, 'a matching ended runtime segment is terminal evidence for failure');
+  await rejection;
+});
+
+test('UNagent read fails closed on cancelled/failed states without matching end proof', async () => {
+  const cases = [
+    { status: 'cancelled', expected: 'UNagent cancellation has no matching stopped proof' },
+    { status: 'cancelled', stopConfirmation: { taskId: 't1', targetSessionId: 's1', state: 'pending' }, expected: 'UNagent cancellation has no matching stopped proof' },
+    { status: 'failed', runtimeSegmentProof: { taskId: 't1', targetSessionId: 's1', segmentId: 'segment-1', state: 'pending' }, expected: 'UNagent failure has no matching ended runtime segment' },
+  ];
+  for (const scenario of cases) {
+    const f = context(uaConfig); let reads = 0;
+    const mock = uaMock(f, p => { reads++; return { id: p.taskId, targetSessionId: 's1', ...scenario }; });
+    await assert.rejects(unagent({ call: mock.call, pollMs: 10000 }).execute(f.ctx), error =>
+      error.code === 'OUTCOME_UNKNOWN' && error.message.includes(scenario.expected));
+    assert.equal(reads, 1, 'terminal state without proof must exit read immediately, not poll forever');
+    assert.equal(f.ctx.run.nativeBinding.terminal, false);
+  }
+
+  for (const scenario of [
+    { status: 'cancelled', stopConfirmation: { taskId: 't1', targetSessionId: 's1', state: 'stopped', confirmedAt: Date.now() } },
+    { status: 'failed', runtimeSegmentProof: { taskId: 't1', targetSessionId: 's1', segmentId: 'segment-1', state: 'ended', endedAt: Date.now() } },
+  ]) {
+    const f = context(uaConfig); const mock = uaMock(f, p => ({ id: p.taskId, targetSessionId: 's1', ...scenario }));
+    await assert.rejects(unagent({ call: mock.call, pollMs: 10000 }).execute(f.ctx), { code: 'NATIVE_FAILED' });
+    assert.equal(f.ctx.run.nativeBinding.terminal, true);
+  }
 });
 
 const hConfig = { gatewayDir: '/existing-gateway', hostId: 'host1' };

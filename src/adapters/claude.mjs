@@ -7,9 +7,31 @@ import { capabilities, failure, deferred, text, id, bounded, mcpEntry, executabl
 // https://code.claude.com/docs/en/agent-sdk/user-input
 // https://code.claude.com/docs/en/agent-sdk/sessions
 export function createAdapter(options = {}) {
-  const active = new Map(), sessions = new Map(), uncertain = new Set();
+  const active = new Map(), sessions = new Map(), uncertain = new Map();
   const loadSDK = options.loadSDK ?? (() => import('@anthropic-ai/claude-agent-sdk'));
   const stopMs = options.stopTimeoutMs ?? 5000;
+  const sessionKey = (participantId, cwd, sessionId) => JSON.stringify([participantId, cwd, sessionId]);
+
+  function confirmStopped(ctx) {
+    if (ctx?.confirmedStopped !== true) throw failure('CONFIRM_REQUIRED', 'Confirm native execution stopped before releasing its session lock');
+    const run = ctx.run, participant = ctx.participant, nativeBinding = run?.nativeBinding;
+    if (!participant || !run || !nativeBinding || nativeBinding.adapter !== 'claude' ||
+        nativeBinding.participantId !== participant.id || nativeBinding.workspace !== run.workspace ||
+        nativeBinding.nativeSessionId !== run.nativeSessionId || nativeBinding.dedicated !== true) return { released: false };
+    const key = sessionKey(participant.id, nativeBinding.workspace, nativeBinding.nativeSessionId);
+    if ([...active.entries()].some(([attempt, s]) => attempt === attemptKey(ctx) || s.sessionKey === key)) {
+      throw failure('SESSION_BUSY', 'Claude session still has an active execution');
+    }
+    const lock = uncertain.get(key);
+    if (!lock) return { released: false };
+    if (lock.attemptId !== run.attemptId || lock.nativeBinding.adapter !== nativeBinding.adapter ||
+        lock.nativeBinding.participantId !== nativeBinding.participantId || lock.nativeBinding.workspace !== nativeBinding.workspace ||
+        lock.nativeBinding.nativeSessionId !== nativeBinding.nativeSessionId || lock.nativeBinding.dedicated !== true) {
+      throw failure('BINDING_UNVERIFIED', 'Claude uncertainty belongs to a different native binding or run attempt');
+    }
+    uncertain.delete(key);
+    return { released: true };
+  }
 
   async function cancel(ctx) {
     const s = active.get(attemptKey(ctx));
@@ -32,7 +54,7 @@ export function createAdapter(options = {}) {
         return { state: 'available', message: 'Claude Agent SDK found; credentials and model access are not yet verified.' };
       } catch { return { state: 'needs_setup', message: 'Install @anthropic-ai/claude-agent-sdk before automatic execution.' }; }
     },
-    cancel,
+    cancel, confirmStopped,
     async execute(ctx) {
       const cwd = await workspace(ctx), config = ctx.participant.config ?? {};
       const duration = deadline(ctx, options.maxRunMs);
@@ -40,7 +62,8 @@ export function createAdapter(options = {}) {
       const mcp = mcpEntry(ctx.mcpConfig), key = projectKey(ctx, cwd), cached = sessions.get(key);
       const resumeId = ctx.run.nativeSessionId ?? config.nativeSessionId ?? cached?.nativeSessionId;
       const sessionId = resumeId ? id(resumeId) : randomUUID();
-      if (uncertain.has(sessionId)) throw failure('OUTCOME_UNKNOWN', 'Claude session has an unresolved previous outcome; do not resubmit');
+      const nativeSessionKey = sessionKey(ctx.participant.id, cwd, sessionId);
+      if (uncertain.has(nativeSessionKey)) throw failure('OUTCOME_UNKNOWN', 'Claude session has an unresolved previous outcome; do not resubmit');
       const priorBinding = ctx.run.nativeBinding ?? cached;
       // SDK metadata has cwd but no authoritative idle/busy state for arbitrary
       // CLI sessions. Never attach merely because a session file exists.
@@ -52,7 +75,7 @@ export function createAdapter(options = {}) {
       try { releaseSession = reserve(`claude:session:${sessionId}`); }
       catch (e) { releaseProject(); throw e; }
       const s = { admitted: false, terminal: null, finished: deferred(), failure: deferred(), questions: new AbortController(),
-        inputDone: deferred(), cancelRequested: false, sessionId, outputBytes: 0, eventCount: 0, requests: 0, query: null };
+        inputDone: deferred(), cancelRequested: false, sessionId, sessionKey: nativeSessionKey, outputBytes: 0, eventCount: 0, requests: 0, query: null };
       const nativeBinding = binding('claude', ctx, cwd, sessionId);
       const askNative = questionQueue(ctx, s.questions.signal);
       let timer, onAbort;
@@ -174,7 +197,7 @@ export function createAdapter(options = {}) {
         }
       } catch (e) {
         if (s.admitted && !s.terminal) {
-          uncertain.add(sessionId);
+          uncertain.set(nativeSessionKey, { attemptId: ctx.run.attemptId, nativeBinding });
           throw failure('OUTCOME_UNKNOWN', 'Claude query was admitted but its terminal outcome is unconfirmed');
         }
         throw e;

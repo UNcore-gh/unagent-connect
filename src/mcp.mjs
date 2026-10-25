@@ -87,7 +87,7 @@ class ToolServer extends Protocol {
     this.setRequestHandler(InitializeRequestSchema, async request => ({
       protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.includes(request.params.protocolVersion) ? request.params.protocolVersion : LATEST_PROTOCOL_VERSION,
       capabilities: { tools: {} },
-      serverInfo: { name: 'unagent-connect', version: '0.2.0' },
+      serverInfo: { name: 'unagent-connect', version: '0.2.1' },
     }))
     this.setNotificationHandler(InitializedNotificationSchema, async () => {})
   }

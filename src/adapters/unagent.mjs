@@ -4,6 +4,20 @@ import { capabilities, fault, unknown, required, configOf, bindingOf, persist, b
 
 const key = (...values) => createHash('sha256').update(JSON.stringify(values)).digest('hex');
 const scope = ctx => `unagent-connect:${key(ctx.participant.id, ctx.run.workspace)}`;
+const exactTaskSession = (task, binding) => task?.id === binding.taskId && task?.targetSessionId === binding.sessionId;
+const stoppedProof = (task, binding) => {
+  const proof = task?.stopConfirmation;
+  return exactTaskSession(task, binding) && task.status === 'cancelled'
+    && proof?.taskId === binding.taskId && proof?.targetSessionId === binding.sessionId
+    && proof?.state === 'stopped' && typeof proof.confirmedAt === 'number' && Number.isFinite(proof.confirmedAt);
+};
+const endedSegmentProof = (task, binding) => {
+  const proof = task?.runtimeSegmentProof;
+  return exactTaskSession(task, binding) && proof?.taskId === binding.taskId
+    && proof?.targetSessionId === binding.sessionId && proof?.state === 'ended'
+    && typeof proof.segmentId === 'string' && proof.segmentId.length > 0
+    && typeof proof.endedAt === 'number' && Number.isFinite(proof.endedAt);
+};
 export function createAdapter(options = {}) {
   const call = options.call ?? bridgeCall, q = questions();
   const invoke = (c, method, params, ctx, suffix) => call(c, method, params, key(c.instanceId, c.clientProfile, ctx.run.attemptId, suffix));
@@ -55,7 +69,16 @@ export function createAdapter(options = {}) {
         b = { ...b, terminal: true }; await persist(ctx, b);
         return { text, artifacts: t.result?.artifacts ?? [], nativeSessionId: b.sessionId, nativeBinding: b };
       }
-      if (['failed', 'cancelled'].includes(t.status)) { await persist(ctx, { ...b, terminal: true }); throw fault('NATIVE_FAILED', `UNagent ${t.status}`); }
+      if (t.status === 'cancelled') {
+        if (!stoppedProof(t, b)) throw unknown('UNagent cancellation has no matching stopped proof; retain the native lock');
+        await persist(ctx, { ...b, terminal: true });
+        throw fault('NATIVE_FAILED', 'UNagent cancelled');
+      }
+      if (t.status === 'failed') {
+        if (!endedSegmentProof(t, b)) throw unknown('UNagent failure has no matching ended runtime segment; retain the native lock');
+        await persist(ctx, { ...b, terminal: true });
+        throw fault('NATIVE_FAILED', 'UNagent failed');
+      }
       if (t.status === 'waiting_origin') {
         const questionId = required(t.question?.questionId, 'native questionId');
         if (b.answeredQuestionId === questionId && !asked.has(questionId)) throw unknown('Previously answered UNagent question is still pending; inspect delivery without repeating answer');
@@ -130,7 +153,9 @@ export function createAdapter(options = {}) {
       locator(c, b);
       await invoke(c, 'tasks.cancel', { taskId: b.taskId }, ctx, 'cancel');
       const t = await invoke(c, 'tasks.get', { taskId: b.taskId }, ctx, `cancel-read:${Date.now()}`);
-      const stopped = t.id === b.taskId && (!t.targetSessionId || t.targetSessionId === b.sessionId) && ['completed', 'failed', 'cancelled'].includes(t.status);
+      const identityMatches = exactTaskSession(t, b);
+      const stopped = identityMatches && (t.status === 'completed' || stoppedProof(t, b) ||
+        (t.status === 'failed' && endedSegmentProof(t, b)));
       if (stopped) await persist(ctx, { ...b, terminal: true });
       return { stopped };
     } catch { return { stopped: false }; }
