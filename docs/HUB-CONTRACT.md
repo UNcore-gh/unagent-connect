@@ -17,6 +17,7 @@ Participant/admin methods:
 - runs.list {}; runs.get {runId}; runs.wait {runId,timeoutMs<=25000} -> run, waits for revision/terminal/input. Recipient, sender, ancestor sender/recipient can inspect related tree, not strangers.
 - inbox.list {}; runs.claim {runId,idempotencyKey} -> {run,executionToken}; runs.heartbeat {runId,executionToken}; runs.complete {runId,executionToken,text,artifacts?}; runs.fail {runId,executionToken,error}.
 - runs.cancel {runId}; runs.rework {runId,content,idempotencyKey} -> same run, next round, same thread and native session; sender/admin only, old round must have confirmed termination. Old credential fenced.
+  Cancellation waits at most 5 seconds for adapter stop acknowledgement. An unresponsive adapter leaves the task cancel_requested with its execution lock retained; timeout never means stopped. Repeated concurrent cancellation shares the pending native request. A delayed stop acknowledgement applies only to its original attempt, including after supervision ends; it cannot cancel a later reset attempt. Revocation cancels affected tasks concurrently so one broken adapter cannot prevent cancellation of other entries.
 - questions.ask {runId,executionToken,kind:'clarification'|'approval',text,options?} -> question; questions.answer {questionId,answer?} -> accepted. approval answer {approved:boolean} admin only (local UI), never forwarded agent authority.
 - events.list {after?,limit?,runId?} -> {events,nextCursor} permission-filtered. capabilities/get health report unsupported features explicitly.
 

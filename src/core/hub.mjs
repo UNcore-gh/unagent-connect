@@ -16,8 +16,9 @@ const stable=value=>value===null||typeof value!=='object'?JSON.stringify(value):
 const id=kind=>`${kind}-${randomUUID()}`
 
 export class Hub {
-  constructor({stateDir=path.join(os.homedir(),'.unagent','connect'),adapters=[],now=Date.now,maxConcurrent=1,leaseMs=60000,url='http://127.0.0.1:18492',tickMs=1000}={}) {
+  constructor({stateDir=path.join(os.homedir(),'.unagent','connect'),adapters=[],now=Date.now,maxConcurrent=1,leaseMs=60000,cancelTimeoutMs=5000,url='http://127.0.0.1:18492',tickMs=1000}={}) {
     this.store=new Store(stateDir);this.stateDir=this.store.directory;this.now=now;this.maxConcurrent=number(maxConcurrent,1,1,16);this.leaseMs=leaseMs;this.url=url
+    this.cancelTimeoutMs=number(cancelTimeoutMs,5000,1,25000)
     this.adapters=new Map((adapters instanceof Map?[...adapters.values()]:Array.isArray(adapters)?adapters:Object.values(adapters)).map(a=>[a.id,a]))
     this.listeners=new Set();this.active=new Map();this.closed=false;this.pumping=false;this.pumpAgain=false
     const adminFile=path.join(this.stateDir,'admin.token')
@@ -144,6 +145,7 @@ export class Hub {
   claim(r,key,managed){
     assert(this.canClaim(r),'BUSY','Task is not claimable; a prior task, dependency or native lock is active',409)
     this.participant(r.senderId);const recipient=this.participant(r.recipientId);const credential=token();r.status='running';r.held=true;r.managed=managed;r.claimKey=key;r.credential=credential;r.credentialHash=hash(credential);r.leaseUntil=this.now()+this.leaseMs
+    r.cancelCredentialHash=undefined
     const binding=this.store.get('binding',recipient.id);if(binding){r.nativeSessionId=binding.nativeSessionId;r.nativeBinding=binding.nativeBinding}
     this.saveRun(r);return {run:publicRun(r),executionToken:credential}
   }
@@ -192,13 +194,28 @@ export class Hub {
     fail('UNAVAILABLE','Hub closed')
   }
   descendants(rid){const set=new Set([rid]);let changed=true;const all=this.store.list('run');while(changed){changed=false;for(const r of all)if(r.parentRunId&&set.has(r.parentRunId)&&!set.has(r.id)){set.add(r.id);changed=true}}return set}
+  async stopDriver(rid,live){
+    // A broken adapter must not hold the control channel open. A timeout is
+    // never evidence that native execution stopped; retain its execution lock.
+    if(!live.stopPromise){
+      const attemptId=live.ctx.run.attemptId,executionHash=hash(live.ctx.mcpConfig.env.UNAGENT_CONNECT_EXECUTION_TOKEN)
+      live.stopPromise=Promise.resolve().then(()=>live.adapter.cancel(live.ctx)).then(result=>{
+        if(result?.stopped!==true||this.closed)return
+        this.store.tx(()=>{const r=this.store.get('run',rid);if(r?.attemptId===attemptId&&r.cancelCredentialHash===executionHash&&r.status==='cancel_requested'){r.status='cancelled';r.held=false;r.credential=undefined;r.credentialHash=undefined;this.saveRun(r);this.refreshDependencies()}})
+        this.schedule()
+      }).catch(()=>{}).finally(()=>{live.stopPromise=undefined})
+    }
+    let timer
+    try{await Promise.race([live.stopPromise,new Promise(resolve=>{timer=setTimeout(resolve,this.cancelTimeoutMs)})])}
+    finally{clearTimeout(timer);live.controller.abort()}
+  }
   async cancel(p,actor){keys(p,['runId']);const root=this.run(p.runId,actor);assert(actor.admin||root.senderId===actor.participantId||root.recipientId===actor.participantId,'FORBIDDEN','Cannot cancel another participant’s task',403)
-    const affected=this.descendants(root.id);this.store.tx(()=>{for(const rid of affected){const r=this.store.get('run',rid);if(TERMINAL.has(r.status))continue;this.cancelQuestions(rid);r.status=r.held?'cancel_requested':'cancelled';r.error='Cancellation requested';if(!r.held){r.credential=undefined;r.credentialHash=undefined}this.saveRun(r)}})
-    await Promise.all([...affected].map(async rid=>{const live=this.active.get(rid);if(!live)return;let stopped=false;try{stopped=(await live.adapter.cancel(live.ctx))?.stopped===true}catch{}live.controller.abort();if(stopped&&!this.closed)this.store.tx(()=>{const r=this.store.get('run',rid);if(r?.status==='cancel_requested'){r.status='cancelled';r.held=false;r.credential=undefined;r.credentialHash=undefined;this.saveRun(r)}})}))
+    const affected=this.descendants(root.id);this.store.tx(()=>{for(const rid of affected){const r=this.store.get('run',rid);if(TERMINAL.has(r.status))continue;this.cancelQuestions(rid);r.cancelCredentialHash??=r.credentialHash;r.status=r.held?'cancel_requested':'cancelled';r.error='Cancellation requested';if(!r.held){r.credential=undefined;r.credentialHash=undefined}this.saveRun(r)}})
+    await Promise.all([...affected].map(rid=>{const live=this.active.get(rid);if(live)return this.stopDriver(rid,live)}))
     if(!this.closed)this.store.tx(()=>this.refreshDependencies());this.schedule();return publicRun(this.store.get('run',root.id))
   }
   async revoke(p,actor){this.admin(actor);keys(p,['id']);const entry=this.participant(p.id);this.store.tx(()=>{entry.revokedAt=this.now();entry.autoExecute=false;this.store.put('participant',entry);this.changed('participant.revoked',publicParticipant(entry),[entry.id])})
-    for(const r of this.store.list('run'))if((r.recipientId===entry.id||r.senderId===entry.id)&&!TERMINAL.has(r.status))await this.cancel({runId:r.id},{admin:true})
+    await Promise.all(this.store.list('run').filter(r=>(r.recipientId===entry.id||r.senderId===entry.id)&&!TERMINAL.has(r.status)).map(r=>this.cancel({runId:r.id},{admin:true})))
     return publicParticipant(entry)
   }
   tick(){if(this.closed)return;const now=this.now();const candidates=this.store.list('run').filter(r=>!TERMINAL.has(r.status)&&((r.status==='running'&&!r.managed&&r.leaseUntil<=now)||r.deadlineAt<=now&&!['interrupted','uncertain','cancel_requested','paused'].includes(r.status)))
@@ -218,7 +235,16 @@ export class Hub {
     const valid=()=>{const r=this.store.get('run',rid);assert(r&&r.attemptId===attemptId&&equalHash(r.credentialHash,hash(credential)),'STALE_EXECUTION','Execution changed',409);return r}
     const ctx={run:structuredClone(initial),participant:structuredClone(participant),signal:controller.signal,
       emit:event=>{if(this.closed)return;const r=valid();if(TERMINAL.has(r.status))return;this.changed('adapter.progress',{type:String(event.type??'progress').slice(0,80),text:redact(event.text??'').slice(0,4000)},[r.senderId,r.recipientId],r.id,r.threadId)},
-      saveBinding:binding=>{if(this.closed)return;const r=valid();const safe={...(typeof binding.nativeSessionId==='string'?{nativeSessionId:binding.nativeSessionId}:{}),...(binding.nativeBinding?{nativeBinding:binding.nativeBinding}:{})};assert(JSON.stringify(safe).length<16000,'INVALID_OUTPUT','Native binding too large');Object.assign(r,safe);Object.assign(ctx.run,safe);this.store.tx(()=>{this.saveRun(r);this.store.put('binding',{id:participant.id,...safe})})},
+      saveBinding:binding=>{if(this.closed)return;let r=this.store.get('run',rid)
+        // Stop readback may outlive supervision and its fenced credential. It
+        // may only mark the already-bound native operation terminal, never
+        // replace its identity or update a reset/recovered execution.
+        const stopReadback=r?.attemptId===attemptId&&r.status==='cancel_requested'&&r.nativeBinding
+          &&binding.nativeSessionId===r.nativeSessionId&&binding.nativeBinding?.terminal===true
+          &&stable(binding.nativeBinding)===stable({...r.nativeBinding,terminal:true})
+          &&equalHash(r.cancelCredentialHash,hash(credential))
+        if(!stopReadback)r=valid()
+        const safe={...(typeof binding.nativeSessionId==='string'?{nativeSessionId:binding.nativeSessionId}:{}),...(binding.nativeBinding?{nativeBinding:binding.nativeBinding}:{})};assert(JSON.stringify(safe).length<16000,'INVALID_OUTPUT','Native binding too large');Object.assign(r,safe);Object.assign(ctx.run,safe);this.store.tx(()=>{this.saveRun(r);this.store.put('binding',{id:participant.id,...safe})})},
       ask:async question=>{const q=await this.call('questions.ask',{runId:rid,executionToken:credential,...question},recipientActor);this.schedule();while(!controller.signal.aborted&&!this.closed){const fresh=this.store.get('question',q.id);if(fresh?.status==='answered'){await this.reacquire(rid,credential,controller.signal);return {answer:fresh.answer,approved:fresh.approved}}assert(fresh?.status==='open','STALE_QUESTION','Question cancelled',409);await this.waitChange(250,controller.signal)}fail('ABORTED','Question cancelled')},
       mcpConfig:{command:process.execPath,args:[path.join(ROOT,'bin/connect.mjs'),'mcp'],env:{UNAGENT_CONNECT_URL:this.url,UNAGENT_CONNECT_TOKEN:fs.readFileSync(path.join(this.stateDir,'credentials',participant.id+'.token'),'utf8').trim(),UNAGENT_CONNECT_RUN_ID:rid,UNAGENT_CONNECT_EXECUTION_TOKEN:credential}}
     }
@@ -242,7 +268,7 @@ export class Hub {
     const participant=this.participant(r.recipientId),adapter=this.adapters.get(participant.provider)
     assert(typeof adapter?.recover==='function'&&r.nativeBinding,'UNSUPPORTED','No persisted native execution can be queried')
     const occupied=this.capacity()-(r.held?1:0);assert(occupied<this.maxConcurrent,'BUSY','Wait for another running task before native recovery',409)
-    const credential=token();this.store.tx(()=>{r.status='running';r.managed=true;r.held=true;r.credential=credential;r.credentialHash=hash(credential);r.error=undefined;r.deadlineAt=Math.max(r.deadlineAt,this.now()+60000);this.saveRun(r)})
+    const credential=token();this.store.tx(()=>{r.status='running';r.managed=true;r.held=true;r.credential=credential;r.credentialHash=hash(credential);r.cancelCredentialHash=undefined;r.error=undefined;r.deadlineAt=Math.max(r.deadlineAt,this.now()+60000);this.saveRun(r)})
     this.startDriver(r.id,credential,adapter,participant,true);return publicRun(r)
   }
   async close(){if(this.closed)return;this.closed=true;clearInterval(this.timer);for(const live of this.active.values())live.controller.abort();this.store.tx(()=>{for(const r of this.store.list('run'))if(r.held&&!TERMINAL.has(r.status)){r.status='interrupted';r.error='Hub shut down; native outcome must be checked before re-execution';r.credential=undefined;r.credentialHash=undefined;this.saveRun(r)}});for(const fn of this.listeners)try{fn()}catch{}this.listeners.clear();this.store.close()}

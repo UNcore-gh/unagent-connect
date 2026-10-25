@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { Hub } from '../src/core/hub.mjs'
+import { createAdapter as unagent } from '../src/adapters/unagent.mjs'
 const admin={admin:true}
 const sleep=ms=>new Promise(r=>setTimeout(r,ms))
 async function until(fn,predicate,timeout=3000){const end=Date.now()+timeout;while(Date.now()<end){const value=await fn();if(predicate(value))return value;await sleep(5)}throw new Error('Condition timed out')}
@@ -123,6 +124,55 @@ test('failed cancellation keeps native lock until stop evidence or explicit rese
  const other=await x.send();await assert.rejects(x.hub.call('runs.claim',{runId:other.id,idempotencyKey:'take'},x.actorB),{code:'BUSY'})
  nativeResolve({text:'stopped'});await until(()=>x.hub.call('runs.get',{runId:r.id},admin),r=>r.status==='cancelled')
  assert.ok(await x.hub.call('runs.claim',{runId:other.id,idempotencyKey:'take'},x.actorB))
+})
+test('unresponsive cancellation is bounded, deduplicated and retains locks until late stop evidence',async t=>{
+ let acknowledge,ctx,cancels=0
+ const adapter={id:'codex',capabilities:{automaticExecution:true},health:async()=>({state:'available'}),execute:async value=>{ctx=value;return new Promise(()=>{})},cancel:()=>{cancels++;return new Promise(resolve=>{acknowledge=resolve})}}
+ const x=await fixture(t,{adapters:[adapter],cancelTimeoutMs:25});const worker=await x.create('managed',{provider:'codex',autoExecute:true})
+ const run=await x.send({senderId:x.a.participant.id,recipientId:worker.participant.id},admin)
+ await until(()=>ctx,Boolean)
+ const requests=[1,2].map(()=>x.hub.call('runs.cancel',{runId:run.id},admin))
+ const results=await Promise.race([Promise.all(requests),sleep(1000).then(()=>{throw new Error('Cancellation control channel hung')})])
+ assert.ok(results.every(r=>r.status==='cancel_requested'));assert.equal(cancels,1);assert.equal(ctx.signal.aborted,true)
+ const other=await x.send({idempotencyKey:'other'})
+ await assert.rejects(x.hub.call('runs.claim',{runId:other.id,idempotencyKey:'take'},x.actorB),{code:'BUSY'})
+ // Revocation remains available even while the same native stop request hangs.
+ await x.hub.call('participants.revoke',{id:worker.participant.id},admin)
+ assert.throws(()=>x.hub.authenticate(worker.token),{code:'UNAUTHORIZED'});assert.equal(cancels,1)
+ acknowledge({stopped:true})
+ await until(()=>x.hub.call('runs.get',{runId:run.id},admin),r=>r.status==='cancelled')
+ assert.ok(await x.hub.call('runs.claim',{runId:other.id,idempotencyKey:'take'},x.actorB))
+})
+test('real UNagent stop readback persists after supervision credentials are fenced',async t=>{
+ let acknowledge,ctx
+ const config={bridgeDir:'/test-connector',instanceId:'test-instance',clientProfile:'test-client'}
+ const native=unagent({call:async(c,method,p)=>{
+  if(method==='tasks.cancel')return new Promise(resolve=>{acknowledge=resolve})
+  assert.equal(method,'tasks.get');return{id:p.taskId,targetSessionId:'native-session',status:'cancelled'}
+ }})
+ const adapter={...native,execute:async value=>{ctx=value;ctx.saveBinding({nativeSessionId:'native-session',nativeBinding:{provider:'unagent',workspace:ctx.run.workspace,participantId:ctx.participant.id,attemptId:ctx.run.attemptId,sessionId:'native-session',taskId:'native-task',...config,terminal:false}});return new Promise((resolve,reject)=>ctx.signal.addEventListener('abort',()=>reject(Object.assign(new Error('Supervision ended'),{code:'OUTCOME_UNKNOWN'})),{once:true}))}}
+ const x=await fixture(t,{adapters:[adapter],cancelTimeoutMs:25});const worker=await x.create('managed',{provider:'unagent',autoExecute:true,config})
+ const run=await x.send({senderId:x.a.participant.id,recipientId:worker.participant.id},admin);await until(()=>ctx?.run.nativeBinding,Boolean)
+ await x.hub.call('runs.cancel',{runId:run.id},admin);await until(()=>!x.hub.active.has(run.id),Boolean)
+ assert.equal(x.hub.store.get('run',run.id).credentialHash,undefined)
+ assert.throws(()=>ctx.saveBinding({nativeSessionId:'foreign',nativeBinding:{...ctx.run.nativeBinding,sessionId:'foreign',terminal:true}}),{code:'STALE_EXECUTION'})
+ acknowledge({})
+ await until(()=>x.hub.call('runs.get',{runId:run.id},admin),r=>r.status==='cancelled')
+ assert.equal(x.hub.store.get('run',run.id).nativeBinding.terminal,true);assert.equal(x.hub.capacity(),0)
+})
+test('late cancellation acknowledgement cannot terminate a reset execution',async t=>{
+ let acknowledge,ctx
+ const adapter={id:'codex',capabilities:{automaticExecution:true},health:async()=>({state:'available'}),execute:async value=>{ctx=value;return new Promise((resolve,reject)=>value.signal.addEventListener('abort',()=>reject(Object.assign(new Error('Supervision ended'),{code:'OUTCOME_UNKNOWN'})),{once:true}))},cancel:()=>new Promise(resolve=>{acknowledge=resolve})}
+ const x=await fixture(t,{adapters:[adapter],cancelTimeoutMs:25});const worker=await x.create('managed',{provider:'codex',autoExecute:true})
+ const run=await x.send({senderId:x.a.participant.id,recipientId:worker.participant.id},admin);await until(()=>ctx,Boolean)
+ await x.hub.call('runs.cancel',{runId:run.id},admin)
+ await until(()=>!x.hub.active.has(run.id),Boolean)
+ await x.hub.call('participants.update',{id:worker.participant.id,autoExecute:false},admin)
+ const reset=await x.hub.call('runs.reset',{runId:run.id,confirmStopped:true},admin)
+ const claim=await x.hub.call('runs.claim',{runId:run.id,idempotencyKey:'new-attempt'},x.hub.authenticate(worker.token))
+ acknowledge({stopped:true});await sleep(10)
+ const current=await x.hub.call('runs.get',{runId:run.id},admin)
+ assert.notEqual(reset.attemptId,run.attemptId);assert.equal(current.status,'running');assert.equal(current.attemptId,claim.run.attemptId)
 })
 test('same-recipient dependency waits do not block earlier tasks, handoff loops and chain rounds are bounded',async t=>{
  const x=await fixture(t);const first=await x.send();const second=await x.send({content:'second',idempotencyKey:'second',dependencyRunIds:[first.id]})
